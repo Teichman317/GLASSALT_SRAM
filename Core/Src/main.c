@@ -770,6 +770,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(TP_RESET_PD11_GPIO_Port, TP_RESET_PD11_Pin, GPIO_PIN_SET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(PA15_SPI2_CS_GPIO_Port, PA15_SPI2_CS_Pin, GPIO_PIN_RESET);
+
   /*Configure GPIO pins : SW_RESET_PE3_Pin SW_CNTR_PE4_Pin SW_TEST_PE5_Pin */
   GPIO_InitStruct.Pin = SW_RESET_PE3_Pin|SW_CNTR_PE4_Pin|SW_TEST_PE5_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
@@ -783,11 +786,18 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(TP_RESET_PD11_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : TP_INT_PG13_Pin */
-  GPIO_InitStruct.Pin = TP_INT_PG13_Pin;
+  /*Configure GPIO pin : TP_INT_PG3_Pin */
+  GPIO_InitStruct.Pin = TP_INT_PG3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(TP_INT_PG13_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(TP_INT_PG3_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PA15_SPI2_CS_Pin */
+  GPIO_InitStruct.Pin = PA15_SPI2_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(PA15_SPI2_CS_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
