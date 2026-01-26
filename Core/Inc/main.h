@@ -59,6 +59,16 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define SW_RESET_PE3_Pin GPIO_PIN_3
+#define SW_RESET_PE3_GPIO_Port GPIOE
+#define SW_CNTR_PE4_Pin GPIO_PIN_4
+#define SW_CNTR_PE4_GPIO_Port GPIOE
+#define SW_TEST_PE5_Pin GPIO_PIN_5
+#define SW_TEST_PE5_GPIO_Port GPIOE
+#define TP_RESET_PD11_Pin GPIO_PIN_11
+#define TP_RESET_PD11_GPIO_Port GPIOD
+#define TP_INT_PG13_Pin GPIO_PIN_3
+#define TP_INT_PG13_GPIO_Port GPIOG
 
 /* USER CODE BEGIN Private defines */
 
