@@ -771,6 +771,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(TP_RESET_PD11_GPIO_Port, TP_RESET_PD11_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(PG2_LDC_RESET_GPIO_Port, PG2_LDC_RESET_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(PA15_SPI2_CS_GPIO_Port, PA15_SPI2_CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : SW_RESET_PE3_Pin SW_CNTR_PE4_Pin SW_TEST_PE5_Pin */
@@ -785,6 +788,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(TP_RESET_PD11_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PG2_LDC_RESET_Pin */
+  GPIO_InitStruct.Pin = PG2_LDC_RESET_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(PG2_LDC_RESET_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : TP_INT_PG3_Pin */
   GPIO_InitStruct.Pin = TP_INT_PG3_Pin;

@@ -67,6 +67,8 @@ void Error_Handler(void);
 #define SW_TEST_PE5_GPIO_Port GPIOE
 #define TP_RESET_PD11_Pin GPIO_PIN_11
 #define TP_RESET_PD11_GPIO_Port GPIOD
+#define PG2_LDC_RESET_Pin GPIO_PIN_2
+#define PG2_LDC_RESET_GPIO_Port GPIOG
 #define TP_INT_PG3_Pin GPIO_PIN_3
 #define TP_INT_PG3_GPIO_Port GPIOG
 #define PA15_SPI2_CS_Pin GPIO_PIN_15
