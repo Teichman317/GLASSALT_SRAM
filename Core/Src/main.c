@@ -782,6 +782,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : PB15_ENC_SW_Pin */
+  GPIO_InitStruct.Pin = PB15_ENC_SW_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(PB15_ENC_SW_GPIO_Port, &GPIO_InitStruct);
+
   /*Configure GPIO pin : TP_RESET_PD11_Pin */
   GPIO_InitStruct.Pin = TP_RESET_PD11_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
