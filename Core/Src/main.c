@@ -19,10 +19,13 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "string.h"
+#include "fatfs.h"
+#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "usbd_cdc_if.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -79,8 +82,6 @@ SPI_HandleTypeDef hspi6;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim4;
 
-PCD_HandleTypeDef hpcd_USB_OTG_FS;
-
 SDRAM_HandleTypeDef hsdram1;
 
 /* USER CODE BEGIN PV */
@@ -102,7 +103,6 @@ static void MX_TIM2_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_I2C4_Init(void);
 static void MX_SPI6_Init(void);
-static void MX_USB_OTG_FS_PCD_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -139,7 +139,38 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
+  /* MPU region 0 (4GB no-access, SubRegionDisable=0x87) blocks sub-regions 3-6,
+   * which covers FMC control registers (0xA0000000) and SDRAM (0xC0000000).
+   * Add higher-priority regions to allow access to those two ranges. */
+  {
+    MPU_Region_InitTypeDef r = {0};
+    HAL_MPU_Disable();
 
+    /* Region 1: FMC control registers 0xA0000000, 64KB, Device memory */
+    r.Enable             = MPU_REGION_ENABLE;
+    r.Number             = MPU_REGION_NUMBER1;
+    r.BaseAddress        = 0xA0000000;
+    r.Size               = MPU_REGION_SIZE_64KB;
+    r.SubRegionDisable   = 0x00;
+    r.TypeExtField       = MPU_TEX_LEVEL0;
+    r.AccessPermission   = MPU_REGION_FULL_ACCESS;
+    r.DisableExec        = MPU_INSTRUCTION_ACCESS_DISABLE;
+    r.IsShareable        = MPU_ACCESS_SHAREABLE;
+    r.IsCacheable        = MPU_ACCESS_NOT_CACHEABLE;
+    r.IsBufferable       = MPU_ACCESS_BUFFERABLE;
+    HAL_MPU_ConfigRegion(&r);
+
+    /* Region 2: SDRAM 0xC0000000, 32MB, Normal write-through */
+    r.Number             = MPU_REGION_NUMBER2;
+    r.BaseAddress        = 0xC0000000;
+    r.Size               = MPU_REGION_SIZE_32MB;
+    r.IsShareable        = MPU_ACCESS_NOT_SHAREABLE;
+    r.IsCacheable        = MPU_ACCESS_CACHEABLE;
+    r.IsBufferable       = MPU_ACCESS_NOT_BUFFERABLE; /* write-through, no write-allocate */
+    HAL_MPU_ConfigRegion(&r);
+
+    HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+  }
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -155,9 +186,97 @@ int main(void)
   MX_TIM4_Init();
   MX_I2C4_Init();
   MX_SPI6_Init();
-  MX_USB_OTG_FS_PCD_Init();
+  MX_USB_DEVICE_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
+  /* Configure PD7 as push-pull output for debug toggling */
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
+  HAL_Delay(1000); /* Wait for USB enumeration on host */
+
+  /* SDRAM read/write test: write XOR pattern then verify */
+  {
+    volatile uint32_t *sdram = (volatile uint32_t *)0xC0000000UL;
+    const uint32_t testWords = 256UL * 1024UL; /* 1 MB */
+    uint32_t errors = 0;
+    uint32_t firstErrIdx = 0, firstExpected = 0, firstActual = 0;
+    char msg[80];
+
+    for (uint32_t i = 0; i < testWords; i++) {
+      sdram[i] = i ^ 0xA5A5A5A5UL;
+    }
+    __DSB(); /* ensure all writes committed before reading back */
+    for (uint32_t i = 0; i < testWords; i++) {
+      uint32_t expected = i ^ 0xA5A5A5A5UL;
+      uint32_t actual   = sdram[i];
+      if (actual != expected) {
+        if (errors == 0) {
+          firstErrIdx = i;
+          firstExpected = expected;
+          firstActual   = actual;
+        }
+        if (++errors >= 10) break;
+      }
+    }
+
+    if (errors == 0) {
+      snprintf(msg, sizeof(msg), "SDRAM OK: 1MB pass\r\n");
+    } else {
+      snprintf(msg, sizeof(msg), "SDRAM FAIL: %u errors, [%lu] exp %08lX got %08lX\r\n",
+               (unsigned)errors,
+               (unsigned long)firstErrIdx,
+               (unsigned long)firstExpected,
+               (unsigned long)firstActual);
+    }
+    CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+  }
+
+  /* Start backlight PWM on TIM4 CH2 (PD13 -> TPS61043 CTRL pin)
+   * TIM4 clk = 108 MHz, Period = 65535 -> ~1648 Hz PWM
+   * 50% duty cycle for initial test */
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 32768);
+
+  /* FATFS: mount and list root directory */
+  {
+    static FATFS fs;
+    DIR dir;
+    FILINFO fno;
+    FRESULT fr;
+    char fsmsg[80];
+
+    fr = f_mount(&fs, "", 1);
+    if (fr == FR_OK) {
+      CDC_Transmit_FS((uint8_t *)"FS: mounted\r\n", 13);
+      HAL_Delay(10);
+      fr = f_opendir(&dir, "/");
+      if (fr == FR_OK) {
+        while (1) {
+          fr = f_readdir(&dir, &fno);
+          if (fr != FR_OK || fno.fname[0] == 0) break;
+          snprintf(fsmsg, sizeof(fsmsg), "%s %s  %lu bytes\r\n",
+                   (fno.fattrib & AM_DIR) ? "[DIR] " : "[FILE]",
+                   fno.fname, (unsigned long)fno.fsize);
+          CDC_Transmit_FS((uint8_t *)fsmsg, (uint16_t)strlen(fsmsg));
+          HAL_Delay(10);
+        }
+        f_closedir(&dir);
+        CDC_Transmit_FS((uint8_t *)"FS: done\r\n", 10);
+      } else {
+        snprintf(fsmsg, sizeof(fsmsg), "FS: opendir failed %d\r\n", (int)fr);
+        CDC_Transmit_FS((uint8_t *)fsmsg, (uint16_t)strlen(fsmsg));
+      }
+    } else {
+      snprintf(fsmsg, sizeof(fsmsg), "FS: mount failed %d\r\n", (int)fr);
+      CDC_Transmit_FS((uint8_t *)fsmsg, (uint16_t)strlen(fsmsg));
+    }
+    f_mount(NULL, "", 0);
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -167,6 +286,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_7);
+    CDC_Transmit_FS((uint8_t *)"Hello World!\r\n", 14);
+    HAL_Delay(1000);
   }
   /* USER CODE END 3 */
 }
@@ -183,22 +305,28 @@ void SystemClock_Config(void)
   /** Configure the main internal regulator output voltage
   */
   __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 16;
-  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLN = 432;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 9;
   RCC_OscInitStruct.PLL.PLLR = 2;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Activate the Over-Drive mode
+  */
+  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
   {
     Error_Handler();
   }
@@ -207,12 +335,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_7) != HAL_OK)
   {
     Error_Handler();
   }
@@ -293,7 +421,8 @@ static void MX_ETH_Init(void)
 
   if (HAL_ETH_Init(&heth) != HAL_OK)
   {
-    Error_Handler();
+    /* Non-fatal: no ETH PHY populated on this board.
+     * NOTE: CubeMX regen will restore Error_Handler() here — re-apply this comment. */
   }
 
   memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
@@ -322,7 +451,7 @@ static void MX_I2C4_Init(void)
 
   /* USER CODE END I2C4_Init 1 */
   hi2c4.Instance = I2C4;
-  hi2c4.Init.Timing = 0x00303D5B;
+  hi2c4.Init.Timing = 0x20404768;
   hi2c4.Init.OwnAddress1 = 0;
   hi2c4.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c4.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -493,14 +622,6 @@ static void MX_SDMMC1_SD_Init(void)
   hsd1.Init.BusWide = SDMMC_BUS_WIDE_1B;
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
   hsd1.Init.ClockDiv = 0;
-  if (HAL_SD_Init(&hsd1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B) != HAL_OK)
-  {
-    Error_Handler();
-  }
   /* USER CODE BEGIN SDMMC1_Init 2 */
 
   /* USER CODE END SDMMC1_Init 2 */
@@ -646,41 +767,6 @@ static void MX_TIM4_Init(void)
 }
 
 /**
-  * @brief USB_OTG_FS Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USB_OTG_FS_PCD_Init(void)
-{
-
-  /* USER CODE BEGIN USB_OTG_FS_Init 0 */
-
-  /* USER CODE END USB_OTG_FS_Init 0 */
-
-  /* USER CODE BEGIN USB_OTG_FS_Init 1 */
-
-  /* USER CODE END USB_OTG_FS_Init 1 */
-  hpcd_USB_OTG_FS.Instance = USB_OTG_FS;
-  hpcd_USB_OTG_FS.Init.dev_endpoints = 6;
-  hpcd_USB_OTG_FS.Init.speed = PCD_SPEED_FULL;
-  hpcd_USB_OTG_FS.Init.dma_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
-  hpcd_USB_OTG_FS.Init.Sof_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.low_power_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.lpm_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.vbus_sensing_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.use_dedicated_ep1 = DISABLE;
-  if (HAL_PCD_Init(&hpcd_USB_OTG_FS) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USB_OTG_FS_Init 2 */
-
-  /* USER CODE END USB_OTG_FS_Init 2 */
-
-}
-
-/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -742,7 +828,38 @@ static void MX_FMC_Init(void)
   }
 
   /* USER CODE BEGIN FMC_Init 2 */
+  {
+    FMC_SDRAM_CommandTypeDef cmd = {0};
 
+    /* Step 1: Clock Configuration Enable */
+    cmd.CommandMode           = FMC_SDRAM_CMD_CLK_ENABLE;
+    cmd.CommandTarget         = FMC_SDRAM_CMD_TARGET_BANK1;
+    cmd.AutoRefreshNumber     = 1;
+    cmd.ModeRegisterDefinition = 0;
+    HAL_SDRAM_SendCommand(&hsdram1, &cmd, 100);
+    HAL_Delay(1); /* datasheet requires min 100 us after CLK_ENABLE */
+
+    /* Step 2: Precharge All Banks */
+    cmd.CommandMode = FMC_SDRAM_CMD_PALL;
+    HAL_SDRAM_SendCommand(&hsdram1, &cmd, 100);
+
+    /* Step 3: Two Auto-Refresh cycles minimum (use 8 to be safe) */
+    cmd.CommandMode       = FMC_SDRAM_CMD_AUTOREFRESH_MODE;
+    cmd.AutoRefreshNumber = 8;
+    HAL_SDRAM_SendCommand(&hsdram1, &cmd, 100);
+
+    /* Step 4: Load Mode Register
+     * CAS Latency=2, Burst Length=1, Sequential, Write Burst=Single Location */
+    cmd.CommandMode            = FMC_SDRAM_CMD_LOAD_MODE;
+    cmd.AutoRefreshNumber      = 1;
+    cmd.ModeRegisterDefinition = 0x0220; /* BL=1, CAS=2, Write Burst=Single */
+    HAL_SDRAM_SendCommand(&hsdram1, &cmd, 100);
+
+    /* Step 5: Set auto-refresh rate
+     * tREF=64ms, rows=4096, SDRAM_CLK=108MHz
+     * COUNT = (64ms / 4096) * 108MHz - 20 = 1667 */
+    HAL_SDRAM_ProgramRefreshRate(&hsdram1, 1667);
+  }
   /* USER CODE END FMC_Init 2 */
 }
 
@@ -761,6 +878,7 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
