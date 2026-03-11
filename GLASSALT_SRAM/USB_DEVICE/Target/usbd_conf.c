@@ -25,7 +25,7 @@
 #include "usbd_core.h"
 
 /* USER CODE BEGIN Includes */
-
+#include "usbd_cdc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -692,6 +692,16 @@ void USBD_LL_Delay(uint32_t Delay)
 static void SystemClockConfig_Resume(void)
 {
   SystemClock_Config();
+}
+
+/**
+  * @brief  Static allocation for USB CDC class data — avoids heap malloc.
+  */
+static uint32_t usbd_cdc_buf[(sizeof(USBD_CDC_HandleTypeDef) + 3) / 4];
+void *USBD_static_malloc(uint32_t size)
+{
+  (void)size;
+  return usbd_cdc_buf;
 }
 /* USER CODE END 5 */
 /**
