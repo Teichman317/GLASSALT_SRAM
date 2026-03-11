@@ -489,17 +489,31 @@ int main(void)
   /* ===== LCD Display Init ===== */
   CDC_Transmit_FS((uint8_t *)"LCD: init SPI display...\r\n", 25);
   HAL_Delay(10);
+
+  /* SPI6 sanity check — verify HAL_SPI_Transmit works */
+  {
+    uint16_t test = 0x0011;  /* Sleep Out command */
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_RESET);
+    HAL_StatusTypeDef rc = HAL_SPI_Transmit(&hspi6, (uint8_t *)&test, 1, 1000);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);
+    char smsg[40];
+    snprintf(smsg, sizeof(smsg), "SPI6 test: rc=%d state=%d\r\n", (int)rc, (int)hspi6.State);
+    CDC_Transmit_FS((uint8_t *)smsg, (uint16_t)strlen(smsg));
+    HAL_Delay(10);
+  }
+
   Init_LCD_Display();
 
-  CDC_Transmit_FS((uint8_t *)"LCD: loading image from SD...\r\n", 30);
-  HAL_Delay(10);
-  if (LoadImageFromSD_Mirrored("image.bin") == 0) {
-    /* Re-init LTDC with proven timing, pointing at SDRAM framebuffer */
-    MX_Custom_LTDC_Init();
-    CDC_Transmit_FS((uint8_t *)"LCD: LTDC started\r\n", 19);
-  } else {
-    CDC_Transmit_FS((uint8_t *)"LCD: image load FAILED\r\n", 23);
+  /* Fill framebuffer with solid color test pattern (bypass SD for now) */
+  {
+    uint16_t *fb = (uint16_t *)image_buffer;
+    uint16_t color = 0xF800;  /* Red in RGB565 */
+    for (int i = 0; i < IMG_WIDTH * IMG_HEIGHT; i++) fb[i] = color;
+    CDC_Transmit_FS((uint8_t *)"LCD: filled red test pattern\r\n", 29);
+    HAL_Delay(10);
   }
+  MX_Custom_LTDC_Init();
+  CDC_Transmit_FS((uint8_t *)"LCD: LTDC started\r\n", 19);
   HAL_Delay(10);
 
   /* ETH diagnostics: report init result and read PHY ID registers */
@@ -554,7 +568,8 @@ int main(void)
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 32768);
 
-  /* FATFS: mount and list root directory */
+  /* FATFS: directory listing disabled — SD card init hanging, debug separately */
+  #if 0
   {
     static FATFS fs;
     DIR dir;
@@ -589,6 +604,7 @@ int main(void)
     }
     f_mount(NULL, "", 0);
   }
+  #endif
 
   /* USER CODE END 2 */
 
@@ -599,8 +615,24 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_7);
-    HAL_Delay(1);
+    /* Continuous toggle — frequency encodes CDC result:
+       200 Hz = OK (0), 400 Hz = BUSY (1), 800 Hz = FAIL (2) */
+    {
+      uint8_t cdc_rc = CDC_Transmit_FS((uint8_t *)"Hello World!\r\n", 14);
+      uint32_t half_period;
+      if (cdc_rc == 0)      half_period = 2500;  /* 2.5ms half → 200 Hz */
+      else if (cdc_rc == 1) half_period = 1250;  /* 1.25ms half → 400 Hz */
+      else                  half_period = 625;   /* 0.625ms half → 800 Hz */
+
+      /* Toggle for ~500ms at that frequency, then re-check */
+      uint32_t start = HAL_GetTick();
+      while (HAL_GetTick() - start < 500) {
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_7, GPIO_PIN_SET);
+        for (volatile uint32_t d = 0; d < half_period * 27; d++);  /* ~us at 216MHz */
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_7, GPIO_PIN_RESET);
+        for (volatile uint32_t d = 0; d < half_period * 27; d++);
+      }
+    }
   }
   /* USER CODE END 3 */
 }
@@ -882,6 +914,7 @@ static void MX_LTDC_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN LTDC_Init 2 */
+  /* GPIO speed now fixed directly in MSP (VERY_HIGH for all LTDC pins) */
 
   /* USER CODE END LTDC_Init 2 */
 
@@ -943,7 +976,7 @@ static void MX_SDMMC1_SD_Init(void)
   hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_DISABLE;
   hsd1.Init.BusWide = SDMMC_BUS_WIDE_1B;
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd1.Init.ClockDiv = 0;
+  hsd1.Init.ClockDiv = 4;  /* Slow down SDMMC clock for reliable card init */
   /* USER CODE BEGIN SDMMC1_Init 2 */
 
   /* USER CODE END SDMMC1_Init 2 */
@@ -1411,14 +1444,15 @@ static void MX_Custom_LTDC_Init(void)
     hltdc.Init.VSPolarity = LTDC_VSPOLARITY_AL;
     hltdc.Init.DEPolarity = LTDC_DEPOLARITY_AL;
     hltdc.Init.PCPolarity = LTDC_PCPOLARITY_IPC;
-    hltdc.Init.HorizontalSync = 40;
-    hltdc.Init.VerticalSync = 6;
-    hltdc.Init.AccumulatedHBP = 160;
-    hltdc.Init.AccumulatedVBP = 26;
-    hltdc.Init.AccumulatedActiveW = 640;
-    hltdc.Init.AccumulatedActiveH = 506;
-    hltdc.Init.TotalWidth = 760;
-    hltdc.Init.TotalHeigh = 526;
+    /* Typical ST7701S 480x480 timing — 24 MHz pixel clock → ~60 Hz */
+    hltdc.Init.HorizontalSync = 9;     /* HSW = 10 */
+    hltdc.Init.VerticalSync = 1;       /* VSW = 2 */
+    hltdc.Init.AccumulatedHBP = 19;    /* HSW+HBP = 10+10 = 20 */
+    hltdc.Init.AccumulatedVBP = 15;    /* VSW+VBP = 2+14 = 16 */
+    hltdc.Init.AccumulatedActiveW = 499;  /* +480 = 500 */
+    hltdc.Init.AccumulatedActiveH = 495;  /* +480 = 496 */
+    hltdc.Init.TotalWidth = 519;       /* +20 HFP = 520 */
+    hltdc.Init.TotalHeigh = 511;       /* +16 VFP = 512 */
     hltdc.Init.Backcolor.Blue = 0;
     hltdc.Init.Backcolor.Green = 0;
     hltdc.Init.Backcolor.Red = 0;
@@ -1427,15 +1461,18 @@ static void MX_Custom_LTDC_Init(void)
         Error_Handler();
     }
 
+    /* Disable layer 1 (left over from CubeMX init with garbage FBStartAddr=0) */
+    __HAL_LTDC_LAYER_DISABLE(&hltdc, 1);
+
     pLayerCfg.WindowX0 = 0;
-    pLayerCfg.WindowX1 = 479;
+    pLayerCfg.WindowX1 = 480;  /* HAL uses exclusive end */
     pLayerCfg.WindowY0 = 0;
-    pLayerCfg.WindowY1 = 479;
+    pLayerCfg.WindowY1 = 480;
     pLayerCfg.PixelFormat = LTDC_PIXEL_FORMAT_RGB565;
     pLayerCfg.Alpha = 255;
     pLayerCfg.Alpha0 = 0;
-    pLayerCfg.BlendingFactor1 = LTDC_BLENDING_FACTOR1_PAxCA;
-    pLayerCfg.BlendingFactor2 = LTDC_BLENDING_FACTOR2_PAxCA;
+    pLayerCfg.BlendingFactor1 = LTDC_BLENDING_FACTOR1_CA;
+    pLayerCfg.BlendingFactor2 = LTDC_BLENDING_FACTOR2_CA;
     pLayerCfg.FBStartAdress = (uint32_t)image_buffer;
     pLayerCfg.ImageWidth = IMG_WIDTH;
     pLayerCfg.ImageHeight = IMG_HEIGHT;
@@ -1447,15 +1484,7 @@ static void MX_Custom_LTDC_Init(void)
         Error_Handler();
     }
 
-    /* Force stride and base explicitly */
-    L1->CR &= ~LTDC_LxCR_LEN;
-    uint32_t line_bytes = IMG_WIDTH * IMG_BPP;           /* 960 */
-    uint32_t cfblr = (line_bytes + 4) | ((line_bytes + 4) << 16);
-    L1->CFBLR  = cfblr;
-    L1->CFBLNR = IMG_HEIGHT;
-    L1->CFBAR  = (uint32_t)image_buffer;
-    L1->CR |= LTDC_LxCR_LEN;
-    LTDC->SRCR = LTDC_SRCR_IMR;
+    __HAL_LTDC_RELOAD_IMMEDIATE_CONFIG(&hltdc);
 }
 
 /* ===== Load image.bin from SD card into SDRAM (mirrored) ===== */
