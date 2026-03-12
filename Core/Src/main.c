@@ -26,6 +26,7 @@
 /* USER CODE BEGIN Includes */
 #include "usbd_cdc_if.h"
 #include <stdio.h>
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -93,6 +94,23 @@ SDRAM_HandleTypeDef hsdram1;
 /* Framebuffer in SDRAM */
 uint8_t *image_buffer = (uint8_t *)0xC0000000UL;
 
+/* Pointer image in SDRAM (after main framebuffer) */
+#define PTR_WIDTH   63
+#define PTR_HEIGHT  240
+#define PTR_BPP     2
+#define PTR_BYTES   (PTR_WIDTH * PTR_HEIGHT * PTR_BPP)  /* 30720 */
+uint8_t *pointer_buffer = (uint8_t *)(0xC0000000UL + 480*480*2);  /* right after image_buffer */
+
+/* Rotated pointer overlay — full display size so pointer can point any direction */
+#define OVL_WIDTH   480
+#define OVL_HEIGHT  480
+#define OVL_BYTES   (OVL_WIDTH * OVL_HEIGHT * 2)
+uint8_t *overlay_buffer = (uint8_t *)(0xC0000000UL + 480*480*2 + PTR_WIDTH*PTR_HEIGHT*2);
+
+/* Pivot point within pointer source image */
+#define PIVOT_X  32
+#define PIVOT_Y  50
+
 /* LTDC Layer 1 register block */
 #define L1  ((LTDC_Layer_TypeDef *)LTDC_Layer1_BASE)
 /* USER CODE END PV */
@@ -118,7 +136,9 @@ static void Init_LCD_Display(void);
 static void LCD_WriteCommand(uint8_t cmd);
 static void LCD_WriteParameter(uint8_t param);
 static int  LoadImageFromSD_Mirrored(const char *filename);
+static int  LoadImageFromSD(const char *filename, uint8_t *dest, uint32_t size);
 static void fill_checkerboard_8bit(uint8_t *buf);
+static void rotate_pointer(float angle_rad);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -505,10 +525,45 @@ int main(void)
 
   Init_LCD_Display();
 
-  /* Fill framebuffer with checkerboard test pattern */
-  fill_checkerboard_8bit(image_buffer);
-  CDC_Transmit_FS((uint8_t *)"LCD: filled checkerboard pattern\r\n", 33);
-  HAL_Delay(10);
+  /* Try loading image from SD card, fall back to checkerboard */
+  if (LoadImageFromSD_Mirrored("image.bin") != 0) {
+    CDC_Transmit_FS((uint8_t *)"LCD: SD failed, using checkerboard\r\n", 36);
+    HAL_Delay(10);
+    fill_checkerboard_8bit(image_buffer);
+  }
+
+  /* Check pointer.bin file size and load */
+  {
+    static FATFS fs;
+    FIL fp;
+    char pmsg[80];
+    hsd1.State = HAL_SD_STATE_RESET;
+    HAL_SD_Init(&hsd1);
+    HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B);
+    if (f_mount(&fs, "", 1) == FR_OK) {
+      if (f_open(&fp, "pointer.bin", FA_READ) == FR_OK) {
+        uint32_t fsize = f_size(&fp);
+        snprintf(pmsg, sizeof(pmsg), "PTR: file size = %lu bytes\r\n", (unsigned long)fsize);
+        CDC_Transmit_FS((uint8_t *)pmsg, (uint16_t)strlen(pmsg));
+        HAL_Delay(10);
+        f_close(&fp);
+      }
+      f_mount(NULL, "", 0);
+    }
+  }
+  if (LoadImageFromSD("pointer.bin", pointer_buffer, PTR_BYTES) != 0) {
+    CDC_Transmit_FS((uint8_t *)"PTR: load failed\r\n", 18);
+    HAL_Delay(10);
+  } else {
+    /* Byte-swap RGB565 pixels (big-endian file → little-endian MCU) */
+    uint16_t *px = (uint16_t *)pointer_buffer;
+    for (int i = 0; i < PTR_WIDTH * PTR_HEIGHT; i++) {
+      px[i] = (px[i] >> 8) | (px[i] << 8);
+    }
+    /* Render initial frame at 0 degrees */
+    rotate_pointer(0.0f);
+  }
+
   MX_Custom_LTDC_Init();
   CDC_Transmit_FS((uint8_t *)"LCD: LTDC started\r\n", 19);
   HAL_Delay(10);
@@ -612,23 +667,20 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* Continuous toggle — frequency encodes CDC result:
-       200 Hz = OK (0), 400 Hz = BUSY (1), 800 Hz = FAIL (2) */
+    /* Rotate pointer: 45° steps, hold 5 seconds each */
     {
-      uint8_t cdc_rc = CDC_Transmit_FS((uint8_t *)"Hello World!\r\n", 14);
-      uint32_t half_period;
-      if (cdc_rc == 0)      half_period = 2500;  /* 2.5ms half → 200 Hz */
-      else if (cdc_rc == 1) half_period = 1250;  /* 1.25ms half → 400 Hz */
-      else                  half_period = 625;   /* 0.625ms half → 800 Hz */
+      static uint32_t last_step_time = 0;
+      static int step = 0;
+      if (last_step_time == 0) last_step_time = HAL_GetTick();
 
-      /* Toggle for ~500ms at that frequency, then re-check */
-      uint32_t start = HAL_GetTick();
-      while (HAL_GetTick() - start < 500) {
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_7, GPIO_PIN_SET);
-        for (volatile uint32_t d = 0; d < half_period * 27; d++);  /* ~us at 216MHz */
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_7, GPIO_PIN_RESET);
-        for (volatile uint32_t d = 0; d < half_period * 27; d++);
+      if (HAL_GetTick() - last_step_time >= 5000) {
+        step++;
+        if (step >= 8) step = 0;
+        float angle = (float)step * (6.2831853f / 8.0f);  /* 45° increments */
+        rotate_pointer(angle);
+        last_step_time = HAL_GetTick();
       }
+      HAL_Delay(50);
     }
   }
   /* USER CODE END 3 */
@@ -1458,11 +1510,11 @@ static void MX_Custom_LTDC_Init(void)
         Error_Handler();
     }
 
-    /* Disable layer 1 (left over from CubeMX init with garbage FBStartAddr=0) */
+    /* --- Layer 0: background image (480x480 RGB565) --- */
     __HAL_LTDC_LAYER_DISABLE(&hltdc, 1);
 
     pLayerCfg.WindowX0 = 0;
-    pLayerCfg.WindowX1 = 480;  /* HAL uses exclusive end */
+    pLayerCfg.WindowX1 = 480;
     pLayerCfg.WindowY0 = 0;
     pLayerCfg.WindowY1 = 480;
     pLayerCfg.PixelFormat = LTDC_PIXEL_FORMAT_RGB565;
@@ -1481,6 +1533,34 @@ static void MX_Custom_LTDC_Init(void)
         Error_Handler();
     }
 
+    /* --- Layer 1: rotated pointer overlay (full screen, color key black) --- */
+    {
+        LTDC_LayerCfgTypeDef ptrCfg = {0};
+        ptrCfg.WindowX0 = 0;
+        ptrCfg.WindowX1 = 480;
+        ptrCfg.WindowY0 = 0;
+        ptrCfg.WindowY1 = 480;
+        ptrCfg.PixelFormat = LTDC_PIXEL_FORMAT_RGB565;
+        ptrCfg.Alpha = 255;
+        ptrCfg.Alpha0 = 0;
+        ptrCfg.BlendingFactor1 = LTDC_BLENDING_FACTOR1_PAxCA;
+        ptrCfg.BlendingFactor2 = LTDC_BLENDING_FACTOR2_PAxCA;
+        ptrCfg.FBStartAdress = (uint32_t)overlay_buffer;
+        ptrCfg.ImageWidth = OVL_WIDTH;
+        ptrCfg.ImageHeight = OVL_HEIGHT;
+        ptrCfg.Backcolor.Blue = 0;
+        ptrCfg.Backcolor.Green = 0;
+        ptrCfg.Backcolor.Red = 0;
+        if (HAL_LTDC_ConfigLayer(&hltdc, &ptrCfg, 1) != HAL_OK)
+        {
+            Error_Handler();
+        }
+
+        /* Enable color keying — black (0x000000) = transparent */
+        HAL_LTDC_EnableColorKeying(&hltdc, 1);
+        HAL_LTDC_ConfigColorKeying(&hltdc, 0x000000, 1);
+    }
+
     __HAL_LTDC_RELOAD_IMMEDIATE_CONFIG(&hltdc);
 }
 
@@ -1494,7 +1574,28 @@ static int LoadImageFromSD_Mirrored(const char *filename)
     UINT bytes_read;
     char msg[80];
 
-    hsd1.State = HAL_SD_STATE_READY;
+    /* Re-init SD peripheral — MX_SDMMC1_SD_Init only sets struct fields */
+    hsd1.State = HAL_SD_STATE_RESET;
+    HAL_StatusTypeDef sd_rc = HAL_SD_Init(&hsd1);
+    if (sd_rc != HAL_OK) {
+        snprintf(msg, sizeof(msg), "LCD: SD init rc=%d err=0x%lX state=%d\r\n",
+                 (int)sd_rc, (unsigned long)hsd1.ErrorCode, (int)hsd1.State);
+        CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+        HAL_Delay(10);
+        /* Retry once after a delay — card may need more power-up time */
+        HAL_Delay(500);
+        hsd1.State = HAL_SD_STATE_RESET;
+        sd_rc = HAL_SD_Init(&hsd1);
+        if (sd_rc != HAL_OK) {
+            snprintf(msg, sizeof(msg), "LCD: SD retry rc=%d err=0x%lX\r\n",
+                     (int)sd_rc, (unsigned long)hsd1.ErrorCode);
+            CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+            HAL_Delay(10);
+            return -1;
+        }
+    }
+    /* Widen to 4-bit bus after init */
+    HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B);
 
     fr = f_mount(&fs, "", 1);
     if (fr != FR_OK) {
@@ -1513,17 +1614,34 @@ static int LoadImageFromSD_Mirrored(const char *filename)
         return -1;
     }
 
-    fr = f_read(&file, image_buffer, TOTAL_BYTES, &bytes_read);
+    /* Read in chunks through internal RAM to avoid DMA-to-SDRAM issues */
+    {
+        static uint8_t chunk[4096] __attribute__((aligned(4)));
+        uint32_t remaining = TOTAL_BYTES;
+        uint32_t offset = 0;
+        while (remaining > 0) {
+            uint32_t to_read = (remaining > sizeof(chunk)) ? sizeof(chunk) : remaining;
+            fr = f_read(&file, chunk, to_read, &bytes_read);
+            if (fr != FR_OK || bytes_read == 0) {
+                snprintf(msg, sizeof(msg), "LCD: read fail %d at %lu got %lu\r\n",
+                         (int)fr, (unsigned long)offset, (unsigned long)bytes_read);
+                CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+                HAL_Delay(10);
+                f_close(&file);
+                f_mount(NULL, "", 0);
+                return -1;
+            }
+            memcpy(&image_buffer[offset], chunk, bytes_read);
+            offset += bytes_read;
+            remaining -= bytes_read;
+        }
+    }
     f_close(&file);
     f_mount(NULL, "", 0);
 
-    if (fr != FR_OK || bytes_read != TOTAL_BYTES) {
-        snprintf(msg, sizeof(msg), "LCD: read fail %d got %lu exp %lu\r\n",
-                 (int)fr, (unsigned long)bytes_read, (unsigned long)TOTAL_BYTES);
-        CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
-        HAL_Delay(10);
-        return -1;
-    }
+    snprintf(msg, sizeof(msg), "LCD: read OK (%lu bytes)\r\n", (unsigned long)TOTAL_BYTES);
+    CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+    HAL_Delay(10);
 
     /* Mirror image horizontally (in-place) */
     for (int y = 0; y < IMG_HEIGHT; y++) {
@@ -1553,6 +1671,111 @@ static void fill_checkerboard_8bit(uint8_t *buf)
         for (int x = 0; x < IMG_WIDTH; x++) {
             uint16_t color = ((x / 40 + y / 40) % 2) ? 0x0000 : 0xFFFF;
             fb[y * IMG_WIDTH + x] = color;
+        }
+    }
+}
+
+/* ===== Generic SD card image loader (chunked read to SDRAM) ===== */
+
+static int LoadImageFromSD(const char *filename, uint8_t *dest, uint32_t size)
+{
+    FRESULT fr;
+    static FATFS fs;
+    FIL file;
+    UINT bytes_read;
+    char msg[80];
+
+    hsd1.State = HAL_SD_STATE_RESET;
+    if (HAL_SD_Init(&hsd1) != HAL_OK) {
+        HAL_Delay(500);
+        hsd1.State = HAL_SD_STATE_RESET;
+        if (HAL_SD_Init(&hsd1) != HAL_OK) {
+            snprintf(msg, sizeof(msg), "SD: init fail for %s\r\n", filename);
+            CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+            HAL_Delay(10);
+            return -1;
+        }
+    }
+    HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B);
+
+    fr = f_mount(&fs, "", 1);
+    if (fr != FR_OK) {
+        snprintf(msg, sizeof(msg), "SD: mount fail %d for %s\r\n", (int)fr, filename);
+        CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+        HAL_Delay(10);
+        return -1;
+    }
+
+    fr = f_open(&file, filename, FA_READ);
+    if (fr != FR_OK) {
+        snprintf(msg, sizeof(msg), "SD: open fail %s err %d\r\n", filename, (int)fr);
+        CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+        HAL_Delay(10);
+        f_mount(NULL, "", 0);
+        return -1;
+    }
+
+    static uint8_t chunk[4096] __attribute__((aligned(4)));
+    uint32_t remaining = size;
+    uint32_t offset = 0;
+    while (remaining > 0) {
+        uint32_t to_read = (remaining > sizeof(chunk)) ? sizeof(chunk) : remaining;
+        fr = f_read(&file, chunk, to_read, &bytes_read);
+        if (fr != FR_OK || bytes_read == 0) {
+            snprintf(msg, sizeof(msg), "SD: read fail %s at %lu\r\n", filename, (unsigned long)offset);
+            CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+            HAL_Delay(10);
+            f_close(&file);
+            f_mount(NULL, "", 0);
+            return -1;
+        }
+        memcpy(&dest[offset], chunk, bytes_read);
+        offset += bytes_read;
+        remaining -= bytes_read;
+    }
+    f_close(&file);
+    f_mount(NULL, "", 0);
+
+    snprintf(msg, sizeof(msg), "SD: loaded %s (%lu bytes)\r\n", filename, (unsigned long)size);
+    CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+    HAL_Delay(10);
+    return 0;
+}
+
+/* ===== Rotate pointer source into full-screen overlay buffer ===== */
+
+static void rotate_pointer(float angle_rad)
+{
+    uint16_t *src = (uint16_t *)pointer_buffer;
+    uint16_t *dst = (uint16_t *)overlay_buffer;
+    float cosA = cosf(angle_rad);
+    float sinA = sinf(angle_rad);
+
+    /* Display center = rotation center */
+    const int cx = 240;
+    const int cy = 240;
+
+    /* Clear overlay to black (transparent via color key) */
+    memset(overlay_buffer, 0, OVL_BYTES);
+
+    /* For each pixel in the source pointer, map it to the rotated position
+       in the overlay. This avoids holes that inverse mapping can cause. */
+    for (int sy = 0; sy < PTR_HEIGHT; sy++) {
+        for (int sx = 0; sx < PTR_WIDTH; sx++) {
+            uint16_t pixel = src[sy * PTR_WIDTH + sx];
+            if (pixel == 0x0000) continue;  /* skip black (transparent) */
+
+            /* Source pixel offset from pivot */
+            float fx = (float)(sx - PIVOT_X);
+            float fy = (float)(sy - PIVOT_Y);
+
+            /* Rotate around pivot, place at display center */
+            int dx = cx + (int)(fx * cosA - fy * sinA + 0.5f);
+            int dy = cy + (int)(fx * sinA + fy * cosA + 0.5f);
+
+            if (dx >= 0 && dx < OVL_WIDTH && dy >= 0 && dy < OVL_HEIGHT) {
+                dst[dy * OVL_WIDTH + dx] = pixel;
+            }
         }
     }
 }
