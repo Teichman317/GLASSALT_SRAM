@@ -148,12 +148,12 @@ DRESULT SD_read(BYTE lun, BYTE *buff, DWORD sector, UINT count)
 {
   DRESULT res = RES_ERROR;
 
-  if(BSP_SD_ReadBlocks_DMA((uint32_t*)buff,
-                            (uint32_t)(sector),
-                            count) == MSD_OK)
+  if(BSP_SD_ReadBlocks((uint32_t*)buff,
+                       (uint32_t) (sector),
+                       count, SD_TIMEOUT) == MSD_OK)
   {
-    /* wait until the DMA read is finished */
-    while(BSP_SD_GetCardState() != MSD_OK)
+    /* wait until the read operation is finished */
+    while(BSP_SD_GetCardState()!= MSD_OK)
     {
     }
     res = RES_OK;

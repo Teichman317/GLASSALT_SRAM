@@ -38,7 +38,7 @@ ENTRY(Reset_Handler)
 /* Highest address of the user mode stack */
 _estack = ORIGIN(RAM) + LENGTH(RAM); /* end of "RAM" Ram type memory */
 
-_Min_Heap_Size = 0x200; /* required amount of heap */
+_Min_Heap_Size = 0x800; /* USB CDC needs >=0x800 for malloc */
 _Min_Stack_Size = 0x400; /* required amount of stack */
 
 /* Memories definition */
@@ -163,6 +163,21 @@ SECTIONS
     . = ALIGN(4);
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
+  } >RAM
+
+  /* ETH DMA Descriptors - must be in RAM for DMA write access */
+  .RxDecripSection (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.RxDecripSection)
+    . = ALIGN(4);
+  } >RAM
+
+  .TxDecripSection (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.TxDecripSection)
+    . = ALIGN(4);
   } >RAM
 
   /* User_heap_stack section, used to check that there is enough "RAM" Ram  type memory left */

@@ -70,9 +70,9 @@
 /*---------- -----------*/
 #define USBD_DEBUG_LEVEL     0U
 /*---------- -----------*/
-#define USBD_LPM_ENABLED     1U
+#define USBD_LPM_ENABLED     0U
 /*---------- -----------*/
-#define USBD_SELF_POWERED     1U
+#define USBD_SELF_POWERED     0U
 
 /****************************************/
 /* #define for FS and HS identification */
@@ -90,11 +90,12 @@
 
 /* Memory management macros */
 
-/** Alias for memory allocation. */
-#define USBD_malloc         malloc
+/** Static allocation — avoids heap dependency entirely. */
+void *USBD_static_malloc(uint32_t size);
+#define USBD_malloc(size)   USBD_static_malloc(size)
 
-/** Alias for memory release. */
-#define USBD_free           free
+/** No-op free for static allocation. */
+#define USBD_free(ptr)      ((void)0)
 
 /** Alias for memory set. */
 #define USBD_memset         memset

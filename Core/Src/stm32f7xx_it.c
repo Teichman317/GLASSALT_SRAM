@@ -59,7 +59,9 @@ extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
 extern DMA_HandleTypeDef hdma_sdmmc1_rx;
 extern DMA_HandleTypeDef hdma_sdmmc1_tx;
 /* USER CODE BEGIN EV */
-
+/* Diagnostic: counts every OTG_FS IRQ entry — if stays 0 after plugging USB,
+ * the NVIC/USB peripheral is not generating interrupts at all. */
+volatile uint32_t usb_irq_cnt = 0;
 /* USER CODE END EV */
 
 /******************************************************************************/

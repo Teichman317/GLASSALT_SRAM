@@ -7,6 +7,9 @@ Release/
 .metadata
 *.launch
 
+# Nested project copy (IDE builds from root)
+GLASSALT_SRAM/
+
 # Build artifacts
 *.o
 *.d

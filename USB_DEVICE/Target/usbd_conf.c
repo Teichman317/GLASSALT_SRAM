@@ -25,7 +25,7 @@
 #include "usbd_core.h"
 
 /* USER CODE BEGIN Includes */
-
+#include "usbd_cdc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -34,7 +34,17 @@
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
-
+/* Diagnostic counters: watch these in STM32CubeIDE Expressions after plugging USB.
+ * usb_fw_marker confirms this firmware image is loaded (not old binary).
+ * usb_suspend_cnt confirms SUSPEND fires and our UNGATE code runs.
+ * usb_resume_cnt  confirms RESUME fires.
+ * If usb_suspend_cnt stays 0 after connecting USB, SUSPEND never fired (clock stays
+ * ungated from init — enumeration should work; check HAL_PCD_ResetCallback breakpoint).
+ * If usb_suspend_cnt > 0 and USB still fails, clock was re-gated after UNGATE — check
+ * PCGCCTL register value (USB_OTG_FS base + 0xE00). */
+volatile uint32_t usb_fw_marker   = 0x20260303UL; /* date; confirms new firmware loaded */
+volatile uint32_t usb_suspend_cnt = 0;
+volatile uint32_t usb_resume_cnt  = 0;
 /* USER CODE END PV */
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
@@ -239,10 +249,24 @@ void HAL_PCD_SuspendCallback(PCD_HandleTypeDef *hpcd)
   __HAL_PCD_GATE_PHYCLOCK(hpcd);
   /* Enter in STOP mode. */
   /* USER CODE BEGIN 2 */
+  usb_suspend_cnt++; /* diagnostic: confirm this callback fires */
   if (hpcd->Init.low_power_enable)
   {
     /* Set SLEEPDEEP bit and SleepOnExit of Cortex System Control Register. */
     SCB->SCR |= (uint32_t)((uint32_t)(SCB_SCR_SLEEPDEEP_Msk | SCB_SCR_SLEEPONEXIT_Msk));
+  }
+  else
+  {
+    /* Low-power mode disabled: immediately ungate the PHY clock.
+     * The HAL gates PCGCCTL.STPPCLK here (line above this USER CODE block).
+     * Without low-power mode, the Suspend+Gate before initial Reset breaks
+     * enumeration: host waits >=100ms before Reset, 3ms idle fires SUSPEND,
+     * STPPCLK=1 gates PHY clock, neither USBRST nor ENUMDNE handlers clear it,
+     * so GET_DESCRIPTOR arrives with PHY clock off -> "Device descriptor request failed". */
+    __HAL_PCD_UNGATE_PHYCLOCK(hpcd);
+    /* Belt-and-suspenders: mask the SUSPEND interrupt in GINTMSK so it cannot
+     * fire again and re-gate the clock until after enumeration completes. */
+    hpcd->Instance->GINTMSK &= ~USB_OTG_GINTMSK_USBSUSPM;
   }
   /* USER CODE END 2 */
 }
@@ -260,7 +284,11 @@ void HAL_PCD_ResumeCallback(PCD_HandleTypeDef *hpcd)
 #endif /* USE_HAL_PCD_REGISTER_CALLBACKS */
 {
   /* USER CODE BEGIN 3 */
-
+  usb_resume_cnt++; /* diagnostic */
+  /* Ungate PHY clock on resume so USB can receive packets after wakeup.
+   * Also re-enable the SUSPEND interrupt (masked during initial enumeration). */
+  __HAL_PCD_UNGATE_PHYCLOCK(hpcd);
+  hpcd->Instance->GINTMSK |= USB_OTG_GINTMSK_USBSUSPM;
   /* USER CODE END 3 */
   USBD_LL_Resume((USBD_HandleTypeDef*)hpcd->pData);
 }
@@ -664,6 +692,16 @@ void USBD_LL_Delay(uint32_t Delay)
 static void SystemClockConfig_Resume(void)
 {
   SystemClock_Config();
+}
+
+/**
+  * @brief  Static allocation for USB CDC class data — avoids heap malloc.
+  */
+static uint32_t usbd_cdc_buf[(sizeof(USBD_CDC_HandleTypeDef) + 3) / 4];
+void *USBD_static_malloc(uint32_t size)
+{
+  (void)size;
+  return usbd_cdc_buf;
 }
 /* USER CODE END 5 */
 /**
