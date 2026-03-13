@@ -105,14 +105,31 @@ uint8_t *pointer_buffer = (uint8_t *)(0xC0000000UL + 480*480*2);  /* right after
 #define OVL_WIDTH   480
 #define OVL_HEIGHT  480
 #define OVL_BYTES   (OVL_WIDTH * OVL_HEIGHT * 2)
-uint8_t *overlay_buffer = (uint8_t *)(0xC0000000UL + 480*480*2 + PTR_WIDTH*PTR_HEIGHT*2);
+uint8_t *overlay_buf0 = (uint8_t *)(0xC0000000UL + 480*480*2 + PTR_WIDTH*PTR_HEIGHT*2);
+uint8_t *overlay_buf1 = (uint8_t *)(0xC0000000UL + 480*480*2 + PTR_WIDTH*PTR_HEIGHT*2 + 480*480*2);
+uint8_t *overlay_front;  /* buffer LTDC is reading */
+uint8_t *overlay_back;   /* buffer CPU is rendering into */
+
+/* 100s counter drum strip in SDRAM (after overlay buffers) */
+#define STRIP_WIDTH   28
+#define STRIP_HEIGHT  567
+#define STRIP_BPP     2
+#define STRIP_BYTES   (STRIP_WIDTH * STRIP_HEIGHT * STRIP_BPP)
+#define STRIP_DIGITS  10
+#define DIGIT_HEIGHT  ((float)STRIP_HEIGHT / STRIP_DIGITS)  /* 56.7 px */
+uint8_t *strip_buffer = (uint8_t *)(0xC0000000UL + 480*480*2 + PTR_WIDTH*PTR_HEIGHT*2 + 480*480*2*2);
+
+/* Counter window position in the 480x480 background (mirrored image!) */
+#define DRUM_X        288   /* left edge — mirrored side */
+#define DRUM_Y        174   /* top edge — expanded vertically */
+#define DRUM_VIS_H    104   /* visible height of counter aperture (2x) */
 
 /* Pivot point within pointer source image */
 #define PIVOT_X  32
 #define PIVOT_Y  50
 
-/* LTDC Layer 1 register block */
-#define L1  ((LTDC_Layer_TypeDef *)LTDC_Layer1_BASE)
+/* LTDC Layer 2 register block (layer index 1) */
+#define L2  ((LTDC_Layer_TypeDef *)LTDC_Layer2_BASE)
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -139,6 +156,7 @@ static int  LoadImageFromSD_Mirrored(const char *filename);
 static int  LoadImageFromSD(const char *filename, uint8_t *dest, uint32_t size);
 static void fill_checkerboard_8bit(uint8_t *buf);
 static void rotate_pointer(float angle_rad);
+static void update_drum(float value);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -555,13 +573,32 @@ int main(void)
     CDC_Transmit_FS((uint8_t *)"PTR: load failed\r\n", 18);
     HAL_Delay(10);
   } else {
-    /* Byte-swap RGB565 pixels (big-endian file → little-endian MCU) */
-    uint16_t *px = (uint16_t *)pointer_buffer;
-    for (int i = 0; i < PTR_WIDTH * PTR_HEIGHT; i++) {
-      px[i] = (px[i] >> 8) | (px[i] << 8);
-    }
-    /* Render initial frame at 0 degrees */
+    /* ARGB4444 — no byte-swap needed */
+    /* Init double-buffer pointers and render initial frame */
+    overlay_front = overlay_buf0;
+    overlay_back  = overlay_buf1;
     rotate_pointer(0.0f);
+  }
+
+  /* Load 100s counter drum strip */
+  if (LoadImageFromSD("wheel100.bin", strip_buffer, STRIP_BYTES) != 0) {
+    CDC_Transmit_FS((uint8_t *)"STRIP: load failed\r\n", 20);
+    HAL_Delay(10);
+  } else {
+    CDC_Transmit_FS((uint8_t *)"STRIP: loaded OK\r\n", 18);
+    HAL_Delay(10);
+    /* Verify strip data in SDRAM */
+    {
+      char vmsg[80];
+      uint16_t *sp = (uint16_t *)strip_buffer;
+      SCB_InvalidateDCache_by_Addr((uint32_t *)strip_buffer, 256);
+      snprintf(vmsg, sizeof(vmsg), "STRIP[0]=%04X [1]=%04X [28]=%04X [280]=%04X\r\n",
+               sp[0], sp[1], sp[28], sp[280]);
+      CDC_Transmit_FS((uint8_t *)vmsg, (uint16_t)strlen(vmsg));
+      HAL_Delay(10);
+    }
+    /* Render initial drum position */
+    update_drum(0.0f);
   }
 
   MX_Custom_LTDC_Init();
@@ -667,20 +704,23 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* Rotate pointer: 45° steps, hold 5 seconds each */
+    /* Continuous slow rotation with synchronized drum counter */
     {
-      static uint32_t last_step_time = 0;
-      static int step = 0;
-      if (last_step_time == 0) last_step_time = HAL_GetTick();
-
-      if (HAL_GetTick() - last_step_time >= 5000) {
-        step++;
-        if (step >= 8) step = 0;
-        float angle = (float)step * (6.2831853f / 8.0f);  /* 45° increments */
+      static float angle = 0.0f;
+      static uint32_t last_frame = 0;
+      if (HAL_GetTick() - last_frame >= 25) {  /* 25 ms = 40 fps */
+        angle += 0.0174533f;  /* +1° per frame → same rotation speed, 2x smoother */
+        if (angle >= 6.2831853f) angle -= 6.2831853f;
         rotate_pointer(angle);
-        last_step_time = HAL_GetTick();
+
+        /* Map pointer angle to 0-9.999 drum value.
+           angle=0 → 12 o'clock → digit 0, clockwise positive */
+        float drum_val = 10.0f - (angle / 6.2831853f * 10.0f) + 5.0f;
+        while (drum_val >= 10.0f) drum_val -= 10.0f;
+        update_drum(drum_val);
+
+        last_frame = HAL_GetTick();
       }
-      HAL_Delay(50);
     }
   }
   /* USER CODE END 3 */
@@ -1216,15 +1256,17 @@ static void MX_FMC_Init(void)
   hsdram1.Init.WriteProtection = FMC_SDRAM_WRITE_PROTECTION_DISABLE;
   hsdram1.Init.SDClockPeriod = FMC_SDRAM_CLOCK_PERIOD_2;
   hsdram1.Init.ReadBurst = FMC_SDRAM_RBURST_ENABLE;
-  hsdram1.Init.ReadPipeDelay = FMC_SDRAM_RPIPE_DELAY_2;
-  /* SdramTiming */
-  SdramTiming.LoadToActiveDelay = 2;
-  SdramTiming.ExitSelfRefreshDelay = 8;
-  SdramTiming.SelfRefreshTime = 5;
-  SdramTiming.RowCycleDelay = 7;
-  SdramTiming.WriteRecoveryTime = 2;
-  SdramTiming.RPDelay = 2;
-  SdramTiming.RCDDelay = 16;
+  hsdram1.Init.ReadPipeDelay = FMC_SDRAM_RPIPE_DELAY_1;
+  /* SdramTiming — IS42S32400J-6TL @ 108 MHz (9.26 ns/clk)
+   * tMRD = 2 clk, tXSR = 72ns→8clk, tRAS = 42ns→5clk,
+   * tRC  = 60ns→7clk, tWR = 2clk, tRP = 18ns→2clk, tRCD = 18ns→2clk */
+  SdramTiming.LoadToActiveDelay = 2;     /* tMRD */
+  SdramTiming.ExitSelfRefreshDelay = 8;  /* tXSR */
+  SdramTiming.SelfRefreshTime = 5;       /* tRAS */
+  SdramTiming.RowCycleDelay = 7;         /* tRC  */
+  SdramTiming.WriteRecoveryTime = 2;     /* tWR  */
+  SdramTiming.RPDelay = 2;              /* tRP  */
+  SdramTiming.RCDDelay = 2;             /* tRCD — was 16! */
 
   if (HAL_SDRAM_Init(&hsdram1, &SdramTiming) != HAL_OK)
   {
@@ -1533,19 +1575,19 @@ static void MX_Custom_LTDC_Init(void)
         Error_Handler();
     }
 
-    /* --- Layer 1: rotated pointer overlay (full screen, color key black) --- */
+    /* --- Layer 1: rotated pointer overlay (full screen, ARGB4444 with alpha) --- */
     {
         LTDC_LayerCfgTypeDef ptrCfg = {0};
         ptrCfg.WindowX0 = 0;
         ptrCfg.WindowX1 = 480;
         ptrCfg.WindowY0 = 0;
         ptrCfg.WindowY1 = 480;
-        ptrCfg.PixelFormat = LTDC_PIXEL_FORMAT_RGB565;
+        ptrCfg.PixelFormat = LTDC_PIXEL_FORMAT_ARGB4444;
         ptrCfg.Alpha = 255;
         ptrCfg.Alpha0 = 0;
         ptrCfg.BlendingFactor1 = LTDC_BLENDING_FACTOR1_PAxCA;
         ptrCfg.BlendingFactor2 = LTDC_BLENDING_FACTOR2_PAxCA;
-        ptrCfg.FBStartAdress = (uint32_t)overlay_buffer;
+        ptrCfg.FBStartAdress = (uint32_t)overlay_front;
         ptrCfg.ImageWidth = OVL_WIDTH;
         ptrCfg.ImageHeight = OVL_HEIGHT;
         ptrCfg.Backcolor.Blue = 0;
@@ -1555,10 +1597,7 @@ static void MX_Custom_LTDC_Init(void)
         {
             Error_Handler();
         }
-
-        /* Enable color keying — black (0x000000) = transparent */
-        HAL_LTDC_EnableColorKeying(&hltdc, 1);
-        HAL_LTDC_ConfigColorKeying(&hltdc, 0x000000, 1);
+        /* No color keying — alpha channel handles transparency */
     }
 
     __HAL_LTDC_RELOAD_IMMEDIATE_CONFIG(&hltdc);
@@ -1744,10 +1783,14 @@ static int LoadImageFromSD(const char *filename, uint8_t *dest, uint32_t size)
 
 /* ===== Rotate pointer source into full-screen overlay buffer ===== */
 
+/* Bounding box of last-rendered pointer per overlay buffer */
+static int bbox_x0[2], bbox_y0[2], bbox_x1[2], bbox_y1[2];
+static int bbox_init = 0;
+
 static void rotate_pointer(float angle_rad)
 {
     uint16_t *src = (uint16_t *)pointer_buffer;
-    uint16_t *dst = (uint16_t *)overlay_buffer;
+    uint16_t *dst = (uint16_t *)overlay_back;
     float cosA = cosf(angle_rad);
     float sinA = sinf(angle_rad);
 
@@ -1755,29 +1798,127 @@ static void rotate_pointer(float angle_rad)
     const int cx = 240;
     const int cy = 240;
 
-    /* Clear overlay to black (transparent via color key) */
-    memset(overlay_buffer, 0, OVL_BYTES);
+    /* Which buffer index is the back buffer? */
+    int bi = (overlay_back == overlay_buf0) ? 0 : 1;
 
-    /* For each pixel in the source pointer, map it to the rotated position
-       in the overlay. This avoids holes that inverse mapping can cause. */
-    for (int sy = 0; sy < PTR_HEIGHT; sy++) {
-        for (int sx = 0; sx < PTR_WIDTH; sx++) {
-            uint16_t pixel = src[sy * PTR_WIDTH + sx];
-            if (pixel == 0x0000) continue;  /* skip black (transparent) */
+    /* Clear the previous bounding box in this back buffer (CPU memset, cache-safe) */
+    if (bbox_init) {
+        int bx0 = bbox_x0[bi], by0 = bbox_y0[bi];
+        int bw = bbox_x1[bi] - bx0 + 1;
+        for (int y = by0; y <= bbox_y1[bi]; y++) {
+            memset(&dst[y * OVL_WIDTH + bx0], 0, bw * 2);
+        }
+    } else {
+        /* First call — clear both buffers fully */
+        memset(overlay_buf0, 0, OVL_BYTES);
+        memset(overlay_buf1, 0, OVL_BYTES);
+        bbox_init = 1;
+    }
 
-            /* Source pixel offset from pivot */
-            float fx = (float)(sx - PIVOT_X);
-            float fy = (float)(sy - PIVOT_Y);
+    /* Compute bounding box of rotated pointer in destination space.
+       Transform all 4 corners of the source rect and take min/max. */
+    int corners_sx[4] = {0, PTR_WIDTH - 1, 0,             PTR_WIDTH - 1};
+    int corners_sy[4] = {0, 0,             PTR_HEIGHT - 1, PTR_HEIGHT - 1};
+    int nx0 = OVL_WIDTH, ny0 = OVL_HEIGHT, nx1 = 0, ny1 = 0;
+    for (int c = 0; c < 4; c++) {
+        float fx = (float)(corners_sx[c] - PIVOT_X);
+        float fy = (float)(corners_sy[c] - PIVOT_Y);
+        int dx = cx + (int)(fx * cosA - fy * sinA);
+        int dy = cy + (int)(fx * sinA + fy * cosA);
+        if (dx < nx0) nx0 = dx;
+        if (dx > nx1) nx1 = dx;
+        if (dy < ny0) ny0 = dy;
+        if (dy > ny1) ny1 = dy;
+    }
+    /* Clamp to overlay bounds */
+    if (nx0 < 0) nx0 = 0;
+    if (ny0 < 0) ny0 = 0;
+    if (nx1 >= OVL_WIDTH)  nx1 = OVL_WIDTH - 1;
+    if (ny1 >= OVL_HEIGHT) ny1 = OVL_HEIGHT - 1;
 
-            /* Rotate around pivot, place at display center */
-            int dx = cx + (int)(fx * cosA - fy * sinA + 0.5f);
-            int dy = cy + (int)(fx * sinA + fy * cosA + 0.5f);
+    /* Inverse mapping: for each destination pixel in the bounding box,
+       look up the source pixel. Write every pixel — opaque source or
+       transparent zero — so no stale data remains. */
+    for (int dy = ny0; dy <= ny1; dy++) {
+        for (int dx = nx0; dx <= nx1; dx++) {
+            /* Reverse-rotate destination back to source coords */
+            float fx = (float)(dx - cx);
+            float fy = (float)(dy - cy);
+            int sx = PIVOT_X + (int)(fx * cosA + fy * sinA + 0.5f);
+            int sy = PIVOT_Y + (int)(-fx * sinA + fy * cosA + 0.5f);
 
-            if (dx >= 0 && dx < OVL_WIDTH && dy >= 0 && dy < OVL_HEIGHT) {
-                dst[dy * OVL_WIDTH + dx] = pixel;
+            uint16_t pixel = 0x0000;  /* default: transparent (alpha=0) */
+            if (sx >= 0 && sx < PTR_WIDTH && sy >= 0 && sy < PTR_HEIGHT) {
+                pixel = src[sy * PTR_WIDTH + sx];
             }
+            dst[dy * OVL_WIDTH + dx] = pixel;
         }
     }
+
+    /* Save bounding box for this buffer's next clear */
+    bbox_x0[bi] = nx0; bbox_y0[bi] = ny0;
+    bbox_x1[bi] = nx1; bbox_y1[bi] = ny1;
+
+    /* Flush the rendered region from D-cache so LTDC sees it */
+    if (nx1 >= nx0 && ny1 >= ny0) {
+        SCB_CleanDCache_by_Addr((uint32_t *)&dst[ny0 * OVL_WIDTH],
+                                (ny1 - ny0 + 1) * OVL_WIDTH * 2);
+    }
+
+    /* Point Layer 2 CFBAR to the newly rendered back buffer */
+    L2->CFBAR = (uint32_t)overlay_back;
+
+    /* Request reload on next vertical blanking — hardware applies the new
+       framebuffer address atomically at the VSync boundary, tear-free */
+    LTDC->SRCR = LTDC_SRCR_VBR;
+
+    /* Wait until the hardware has applied the reload (VBR bit clears) */
+    while (LTDC->SRCR & LTDC_SRCR_VBR) {}
+
+    /* Swap buffer pointers */
+    uint8_t *tmp = overlay_front;
+    overlay_front = overlay_back;
+    overlay_back = tmp;
+}
+
+/* ===== Update 100s counter drum — blit strip window into Layer 0 background ===== */
+
+static void update_drum(float value)
+{
+    /* value: 0.0 to 9.999 — fractional for smooth scrolling */
+    uint16_t *bg  = (uint16_t *)image_buffer;
+    uint16_t *strip = (uint16_t *)strip_buffer;
+
+    /* Calculate y-offset into the strip */
+    float y_offset_f = value * DIGIT_HEIGHT;
+    int y_offset = (int)y_offset_f;
+
+    /* Center the visible window on the current digit */
+    int strip_y_start = y_offset - DRUM_VIS_H / 2 + (int)(DIGIT_HEIGHT / 2);
+
+    /* Blit visible rows from strip into background framebuffer */
+    for (int row = 0; row < DRUM_VIS_H; row++) {
+        int sy = strip_y_start + row;
+
+        /* Wrap around for seamless 9→0 transition */
+        while (sy < 0)            sy += STRIP_HEIGHT;
+        while (sy >= STRIP_HEIGHT) sy -= STRIP_HEIGHT;
+
+        int bg_y = DRUM_Y + row;
+        if (bg_y < 0 || bg_y >= IMG_HEIGHT) continue;
+
+        for (int col = 0; col < STRIP_WIDTH; col++) {
+            int bg_x = DRUM_X + col;
+            if (bg_x < 0 || bg_x >= IMG_WIDTH) continue;
+
+            /* Mirror horizontally to match flipped background */
+            bg[bg_y * IMG_WIDTH + bg_x] = strip[sy * STRIP_WIDTH + (STRIP_WIDTH - 1 - col)];
+        }
+    }
+
+    /* Flush the modified background region from D-cache */
+    SCB_CleanDCache_by_Addr((uint32_t *)&bg[DRUM_Y * IMG_WIDTH],
+                            DRUM_VIS_H * IMG_WIDTH * 2);
 }
 
 /* USER CODE END 4 */
