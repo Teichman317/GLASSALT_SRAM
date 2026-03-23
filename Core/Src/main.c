@@ -36,7 +36,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define PAGE_SIZE   256
+#define BLOCK_SIZE  (64 * 1024)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -157,6 +158,23 @@ static int  LoadImageFromSD(const char *filename, uint8_t *dest, uint32_t size);
 static void fill_checkerboard_8bit(uint8_t *buf);
 static void rotate_pointer(float angle_rad);
 static void update_drum(float value);
+void QSPI_MemoryMapped_Read6B(void);
+void QSPI_MemoryMapped_ReadEB(void);
+void QSPI_MemoryMapped_Read0B(void);
+void QSPI_ExitXIP(void);
+uint8_t QSPI_ReadSR1(uint8_t *sr1);
+uint8_t QSPI_WaitForReady(uint32_t timeout);
+uint8_t QSPI_ReadStatus(void);
+void QSPI_DisableQPI(void);
+uint8_t QSPI_EraseBlock64K_Diag(uint32_t offset);
+uint8_t QSPI_CheckErased(uint32_t addr);
+void QSPI_Reset(void);
+void QSPI_MemoryMapped_DeActivate(void);
+void QSPI_Enter4ByteAddrMode(void);
+void QSPI_Exit4ByteAddrMode(void);
+int WriteImageToFlash(uint32_t flash_addr);
+uint8_t QSPI_WritePage(uint8_t* data, uint32_t addr, uint32_t len);
+uint8_t QSPI_Read(uint8_t* buf, uint32_t addr, uint32_t len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -219,6 +237,17 @@ int main(void)
     r.IsShareable        = MPU_ACCESS_NOT_SHAREABLE;
     r.IsCacheable        = MPU_ACCESS_CACHEABLE;
     r.IsBufferable       = MPU_ACCESS_NOT_BUFFERABLE; /* write-through, no write-allocate */
+    HAL_MPU_ConfigRegion(&r);
+
+    /* Region 3: QSPI memory-mapped 0x90000000, 8MB, read-only, cacheable */
+    r.Number             = MPU_REGION_NUMBER3;
+    r.BaseAddress        = 0x90000000;
+    r.Size               = MPU_REGION_SIZE_8MB;
+    r.AccessPermission   = MPU_REGION_FULL_ACCESS;
+    r.DisableExec        = MPU_INSTRUCTION_ACCESS_DISABLE;
+    r.IsShareable        = MPU_ACCESS_NOT_SHAREABLE;
+    r.IsCacheable        = MPU_ACCESS_CACHEABLE;
+    r.IsBufferable       = MPU_ACCESS_NOT_BUFFERABLE; /* write-through */
     HAL_MPU_ConfigRegion(&r);
 
     HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
@@ -524,6 +553,151 @@ int main(void)
     else
       CDC_Transmit_FS((uint8_t *)"SDRAM: ERRORS found\r\n", 21);
   }
+
+  /* ===== QSPI NOR Flash Test ===== */
+  {
+    char qmsg[120];
+
+    CDC_Transmit_FS((uint8_t *)"QSPI: Starting NOR flash test...\r\n", 34);
+    HAL_Delay(10);
+
+    /* Step 1: Reset flash and check it responds */
+    QSPI_Reset();
+    HAL_Delay(10);
+    QSPI_DisableQPI();  /* ensure SPI mode */
+
+    /* Read JEDEC ID (0x9F) */
+    {
+      uint8_t id[3] = {0};
+      QSPI_CommandTypeDef cmd = {0};
+      cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+      cmd.Instruction     = 0x9F;
+      cmd.DataMode        = QSPI_DATA_1_LINE;
+      cmd.NbData          = 3;
+      if (HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY) == HAL_OK) {
+        HAL_QSPI_Receive(&hqspi, id, HAL_MAX_DELAY);
+      }
+      snprintf(qmsg, sizeof(qmsg), "QSPI: JEDEC ID = %02X %02X %02X (expect 01 60 17 for S25FL064L)\r\n",
+               id[0], id[1], id[2]);
+      CDC_Transmit_FS((uint8_t *)qmsg, (uint16_t)strlen(qmsg));
+      HAL_Delay(10);
+
+      if (id[0] == 0x00 || id[0] == 0xFF) {
+        CDC_Transmit_FS((uint8_t *)"QSPI: No response from flash — check wiring\r\n", 46);
+        HAL_Delay(10);
+        goto qspi_test_done;
+      }
+    }
+
+    /* Step 2: Load image.bin from SD into SDRAM */
+    CDC_Transmit_FS((uint8_t *)"QSPI: Loading image.bin from SD...\r\n", 36);
+    HAL_Delay(10);
+    if (LoadImageFromSD("image.bin", image_buffer, TOTAL_BYTES) != 0) {
+      CDC_Transmit_FS((uint8_t *)"QSPI: SD load failed — skipping flash test\r\n", 45);
+      HAL_Delay(10);
+      goto qspi_test_done;
+    }
+
+    /* Print first 20 bytes from SDRAM (source) */
+    {
+      snprintf(qmsg, sizeof(qmsg), "QSPI: SD first 20:");
+      int pos = strlen(qmsg);
+      for (int i = 0; i < 20; i++) {
+        pos += snprintf(qmsg + pos, sizeof(qmsg) - pos, " %02X", image_buffer[i]);
+      }
+      pos += snprintf(qmsg + pos, sizeof(qmsg) - pos, "\r\n");
+      CDC_Transmit_FS((uint8_t *)qmsg, (uint16_t)pos);
+      HAL_Delay(10);
+
+      snprintf(qmsg, sizeof(qmsg), "QSPI: SD last 20: ");
+      pos = strlen(qmsg);
+      for (int i = TOTAL_BYTES - 20; i < (int)TOTAL_BYTES; i++) {
+        pos += snprintf(qmsg + pos, sizeof(qmsg) - pos, " %02X", image_buffer[i]);
+      }
+      pos += snprintf(qmsg + pos, sizeof(qmsg) - pos, "\r\n");
+      CDC_Transmit_FS((uint8_t *)qmsg, (uint16_t)pos);
+      HAL_Delay(10);
+    }
+
+    /* Step 3: Write full image to flash */
+    CDC_Transmit_FS((uint8_t *)"QSPI: Writing image to flash...\r\n", 33);
+    HAL_Delay(10);
+    if (WriteImageToFlash(0) != 0) {
+      CDC_Transmit_FS((uint8_t *)"QSPI: Flash write FAILED\r\n", 26);
+      HAL_Delay(10);
+      goto qspi_test_done;
+    }
+    CDC_Transmit_FS((uint8_t *)"QSPI: Write complete\r\n", 22);
+    HAL_Delay(10);
+
+    /* Step 4: Read back via memory-mapped mode and verify */
+    {
+      QSPI_MemoryMapped_Read0B();
+      SCB_InvalidateDCache();
+
+      volatile uint8_t *flash = (volatile uint8_t *)0x90000000UL;
+      int pos;
+
+      /* First 20 bytes */
+      snprintf(qmsg, sizeof(qmsg), "QSPI: Flash first 20:");
+      pos = strlen(qmsg);
+      for (int i = 0; i < 20; i++)
+        pos += snprintf(qmsg + pos, sizeof(qmsg) - pos, " %02X", flash[i]);
+      pos += snprintf(qmsg + pos, sizeof(qmsg) - pos, "\r\n");
+      CDC_Transmit_FS((uint8_t *)qmsg, (uint16_t)pos);
+      HAL_Delay(10);
+
+      /* Spot-check at 25%, 50%, 75%, and end */
+      {
+        const uint32_t checkpoints[] = {
+          TOTAL_BYTES / 4,
+          TOTAL_BYTES / 2,
+          (TOTAL_BYTES * 3) / 4,
+          TOTAL_BYTES - 20
+        };
+        const char *labels[] = { "25%", "50%", "75%", "end" };
+
+        for (int c = 0; c < 4; c++) {
+          uint32_t off = checkpoints[c] & ~1U;
+          snprintf(qmsg, sizeof(qmsg), "QSPI: @%s (0x%05lX):", labels[c], (unsigned long)off);
+          pos = strlen(qmsg);
+          for (int i = 0; i < 20; i++)
+            pos += snprintf(qmsg + pos, sizeof(qmsg) - pos, " %02X", flash[off + i]);
+          pos += snprintf(qmsg + pos, sizeof(qmsg) - pos, "\r\n");
+          CDC_Transmit_FS((uint8_t *)qmsg, (uint16_t)pos);
+          HAL_Delay(10);
+        }
+      }
+
+      /* Quick byte-level verify: count mismatches against byte-swapped source */
+      {
+        uint32_t errors = 0;
+        uint32_t first_err_addr = 0;
+        for (uint32_t i = 0; i < TOTAL_BYTES; i += 2) {
+          uint8_t exp_lo = image_buffer[i + 1]; /* swapped */
+          uint8_t exp_hi = image_buffer[i];
+          if (flash[i] != exp_lo || flash[i + 1] != exp_hi) {
+            if (errors == 0) first_err_addr = i;
+            errors++;
+          }
+        }
+        snprintf(qmsg, sizeof(qmsg), "QSPI: Verify: %lu pixel errors", (unsigned long)errors);
+        if (errors > 0) {
+          int len = strlen(qmsg);
+          snprintf(qmsg + len, sizeof(qmsg) - len, ", first @0x%05lX", (unsigned long)first_err_addr);
+        }
+        strncat(qmsg, "\r\n", sizeof(qmsg) - strlen(qmsg) - 1);
+        CDC_Transmit_FS((uint8_t *)qmsg, (uint16_t)strlen(qmsg));
+        HAL_Delay(10);
+      }
+
+      QSPI_MemoryMapped_DeActivate();
+    }
+
+    CDC_Transmit_FS((uint8_t *)"QSPI: Test complete\r\n", 21);
+    HAL_Delay(10);
+  }
+  qspi_test_done:
 
   /* ===== LCD Display Init ===== */
   CDC_Transmit_FS((uint8_t *)"LCD: init SPI display...\r\n", 25);
@@ -1026,11 +1200,11 @@ static void MX_QUADSPI_Init(void)
   /* USER CODE END QUADSPI_Init 1 */
   /* QUADSPI parameter configuration*/
   hqspi.Instance = QUADSPI;
-  hqspi.Init.ClockPrescaler = 255;
-  hqspi.Init.FifoThreshold = 1;
-  hqspi.Init.SampleShifting = QSPI_SAMPLE_SHIFTING_NONE;
-  hqspi.Init.FlashSize = 1;
-  hqspi.Init.ChipSelectHighTime = QSPI_CS_HIGH_TIME_1_CYCLE;
+  hqspi.Init.ClockPrescaler = 1;
+  hqspi.Init.FifoThreshold = 4;
+  hqspi.Init.SampleShifting = QSPI_SAMPLE_SHIFTING_HALFCYCLE;
+  hqspi.Init.FlashSize = 23;
+  hqspi.Init.ChipSelectHighTime = QSPI_CS_HIGH_TIME_2_CYCLE;
   hqspi.Init.ClockMode = QSPI_CLOCK_MODE_0;
   hqspi.Init.FlashID = QSPI_FLASH_ID_1;
   hqspi.Init.DualFlash = QSPI_DUALFLASH_DISABLE;
@@ -1039,7 +1213,7 @@ static void MX_QUADSPI_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN QUADSPI_Init 2 */
-
+  hqspi.Init.FlashSize = 23;
   /* USER CODE END QUADSPI_Init 2 */
 
 }
@@ -1919,6 +2093,540 @@ static void update_drum(float value)
     /* Flush the modified background region from D-cache */
     SCB_CleanDCache_by_Addr((uint32_t *)&bg[DRUM_Y * IMG_WIDTH],
                             DRUM_VIS_H * IMG_WIDTH * 2);
+}
+
+/* ===== QSPI Exit XIP Mode ===== */
+
+void QSPI_ExitXIP(void)
+{
+    QSPI_CommandTypeDef cmd = {0};
+
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction     = 0xFF;   // XIP Exit command
+    cmd.AddressMode     = QSPI_ADDRESS_NONE;
+    cmd.DataMode        = QSPI_DATA_NONE;
+
+    HAL_QSPI_Command(&hqspi, &cmd, HAL_QPSI_TIMEOUT_DEFAULT_VALUE);
+}
+
+/* ===== QSPI Read SR1 ===== */
+
+uint8_t QSPI_ReadSR1(uint8_t *sr1)
+{
+    QSPI_CommandTypeDef cmd = {0};
+
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction     = 0x05; // Read Status Register 1
+    cmd.AddressMode     = QSPI_ADDRESS_NONE;
+    cmd.DataMode        = QSPI_DATA_1_LINE;
+    cmd.NbData          = 1;
+
+    if (HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY) != HAL_OK)
+        return 1;
+
+    if (HAL_QSPI_Receive(&hqspi, sr1, HAL_MAX_DELAY) != HAL_OK)
+        return 1;
+
+    return 0;
+}
+
+/* ===== QSPI Wait For Ready ===== */
+
+uint8_t QSPI_WaitForReady(uint32_t timeout)
+{
+    QSPI_CommandTypeDef cmd = {0};
+    uint8_t sr1 = 0;
+    uint32_t start = HAL_GetTick();
+
+    while (HAL_GetTick() - start < timeout) {
+
+        cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+        cmd.Instruction     = 0x05;  // Read SR1
+        cmd.AddressMode     = QSPI_ADDRESS_NONE;
+        cmd.DataMode        = QSPI_DATA_1_LINE;
+        cmd.NbData          = 1;
+
+        if (HAL_QSPI_Command(&hqspi, &cmd, 100) != HAL_OK) {
+            printf("  CMD error in WaitForReady, state=%d\r\n", hqspi.State);
+            return 1;
+        }
+        if (HAL_QSPI_Receive(&hqspi, &sr1, 100) != HAL_OK) {
+            printf("  RX error in WaitForReady, state=%d\r\n", hqspi.State);
+            return 1;
+        }
+
+        printf("  SR1 in WaitForReady: 0x%02X\r\n", sr1);
+
+        if ((sr1 & 0x01) == 0) {
+            printf("  Ready, exiting WaitForReady\r\n");
+            return 0;
+        }
+    }
+
+    printf("  TIMEOUT WAITING FOR READY, last SR1=0x%02X\r\n", sr1);
+    return 1;
+}
+
+/* ===== QSPI Status & Configuration ===== */
+
+uint8_t QSPI_ReadStatus(void)
+{
+    uint8_t status = 0;
+    QSPI_CommandTypeDef cmd = {0};
+
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction     = 0x05;  // RDSR1
+    cmd.DataMode        = QSPI_DATA_1_LINE;
+    cmd.NbData          = 1;
+
+    if (HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY) == HAL_OK) {
+        HAL_QSPI_Receive(&hqspi, &status, HAL_MAX_DELAY);
+    } else {
+        printf("QSPI_ReadStatus: Command failed\r\n");
+    }
+
+    return status;
+}
+
+void QSPI_DisableQPI(void)
+{
+    uint8_t cr2;
+    QSPI_CommandTypeDef cmd = {0};
+
+    // Read CR2
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction = 0x71;
+    cmd.AddressMode = QSPI_ADDRESS_1_LINE;
+    cmd.Address = 0x000000;  // CR2 at offset 0
+    cmd.DataMode = QSPI_DATA_1_LINE;
+    cmd.NbData = 1;
+    HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY);
+    HAL_QSPI_Receive(&hqspi, &cr2, HAL_MAX_DELAY);
+
+    printf("CR2 before: 0x%02X\r\n", cr2);
+
+    if (cr2 & 0x08)  // QPI bit
+    {
+        printf("Disabling QPI mode...\r\n");
+
+        // WREN
+        cmd.Instruction = 0x06;
+        cmd.DataMode = QSPI_DATA_NONE;
+        HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY);
+
+        // Write CR2
+        uint8_t write_cr2 = cr2 & ~0x08;
+        cmd.Instruction = 0x72;
+        cmd.Address = 0x000000;
+        cmd.DataMode = QSPI_DATA_1_LINE;
+        cmd.NbData = 1;
+        HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY);
+        HAL_QSPI_Transmit(&hqspi, &write_cr2, HAL_MAX_DELAY);
+
+        // Wait
+        while (QSPI_ReadStatus() & 0x01);
+        printf("QPI Disabled\r\n");
+    }
+}
+
+/* ===== QSPI 64K Block Erase with Diagnostics ===== */
+
+uint8_t QSPI_EraseBlock64K_Diag(uint32_t offset)
+{
+    printf("ERASE A: entered function\r\n");
+    printf("=== QSPI 64K ERASE @ 0x%06lX ===\r\n", offset);
+
+    if (offset & 0xFFFF) {
+        printf("ERROR: Offset not 64K aligned\r\n");
+        return 1;
+    }
+
+    // STEP 0 - EXIT XIP MODE (CRITICAL FOR CYPRESS FL-L)
+    printf("Step 0: Sending XIP Exit (FFh)...\r\n");
+    QSPI_ExitXIP();
+    printf("XIP Exit sent.\r\n");
+
+    printf("Step 0.1: Forcing QSPI state to READY...\r\n");
+    hqspi.State = HAL_QSPI_STATE_READY;
+    printf("QSPI state now = %d\r\n", hqspi.State);
+
+    // STEP 1 - WAIT FOR FLASH READY
+    printf("Step 1: Waiting for flash ready...\r\n");
+    if (QSPI_WaitForReady(20000) != 0) {
+        printf("ERROR: Flash not ready before erase\r\n");
+        return 1;
+    }
+    printf("Flash ready.\r\n");
+
+    // STEP 2 - SEND WREN
+    printf("Step 2: Sending WREN (06h)...\r\n");
+
+    QSPI_CommandTypeDef cmd = {0};
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction     = 0x06;
+    cmd.AddressMode     = QSPI_ADDRESS_NONE;
+    cmd.DataMode        = QSPI_DATA_NONE;
+
+    if (HAL_QSPI_Command(&hqspi, &cmd, 100) != HAL_OK) {
+        printf("ERROR: Failed to send WREN\r\n");
+        return 1;
+    }
+    printf("WREN sent.\r\n");
+
+    // STEP 3 - CONFIRM WEL=1
+    printf("Step 3: Checking WEL bit...\r\n");
+    uint8_t sr = 0;
+
+    if (QSPI_ReadSR1(&sr) != 0) {
+        printf("ERROR: Could not read SR1\r\n");
+        return 1;
+    }
+
+    printf("SR1 = 0x%02X\r\n", sr);
+
+    if ((sr & 0x02) == 0) {
+        printf("ERROR: WEL bit not set after WREN\r\n");
+        return 1;
+    }
+    printf("WEL=1 confirmed.\r\n");
+
+    // STEP 4 - SEND 64K ERASE
+    printf("Step 4: Sending 64K erase (D8h)...\r\n");
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction     = 0xD8;
+    cmd.AddressMode     = QSPI_ADDRESS_1_LINE;
+    cmd.AddressSize     = QSPI_ADDRESS_24_BITS;
+    cmd.Address         = offset;
+    cmd.DataMode        = QSPI_DATA_NONE;
+
+    if (HAL_QSPI_Command(&hqspi, &cmd, 100) != HAL_OK) {
+        printf("ERROR: Failed to send erase command\r\n");
+        return 1;
+    }
+    printf("Erase command sent.\r\n");
+
+    // STEP 5 - WAIT FOR ERASE COMPLETE
+    printf("Step 5: Waiting for erase to finish...\r\n");
+
+    if (QSPI_WaitForReady(200000) != 0) {
+        printf("ERROR: Timeout waiting for erase completion\r\n");
+        return 1;
+    }
+
+    printf("Erase completed successfully.\r\n");
+    return 0;
+}
+
+uint8_t QSPI_CheckErased(uint32_t addr)
+{
+    uint8_t buf[16];
+    QSPI_CommandTypeDef cmd = {0};
+
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction     = 0x6B;
+    cmd.AddressMode     = QSPI_ADDRESS_1_LINE;
+    cmd.Address         = addr - 0x90000000;
+    cmd.AddressSize     = QSPI_ADDRESS_24_BITS;
+    cmd.DataMode        = QSPI_DATA_4_LINES;
+    cmd.DummyCycles     = 8;
+    cmd.NbData          = 16;
+    cmd.SIOOMode        = QSPI_SIOO_INST_EVERY_CMD;
+
+    HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY);
+    HAL_QSPI_Receive(&hqspi, buf, HAL_MAX_DELAY);
+
+    printf("ERASE CHECK: ");
+    for (int i = 0; i < 16; i++) printf("%02X ", buf[i]);
+    printf("\r\n");
+
+    for (int i = 0; i < 16; i++) {
+        if (buf[i] != 0xFF) {
+            printf("ERASE FAILED (not 0xFF)\r\n");
+            return 1;
+        }
+    }
+    printf("ERASE PASSED (all 0xFF)\r\n");
+    return 0;
+}
+
+void QSPI_Reset(void)
+{
+    QSPI_CommandTypeDef cmd = {0};
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction     = 0xFF;  // Reset
+    HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY);
+    HAL_Delay(10);
+    printf("HARD RESET SENT (0xFF)\r\n");
+}
+
+void QSPI_MemoryMapped_DeActivate(void)
+{
+    if (HAL_QSPI_Abort(&hqspi) != HAL_OK) {
+        printf("QSPI abort failed\r\n");
+    }
+
+    if (QSPI_WaitForReady(1000) != 0) {
+        printf("QSPI not ready after abort\r\n");
+    }
+
+    QSPI_CommandTypeDef cmd = {0};
+    cmd.InstructionMode = QSPI_INSTRUCTION_NONE;
+    cmd.AddressMode     = QSPI_ADDRESS_NONE;
+    cmd.DataMode        = QSPI_DATA_NONE;
+    cmd.DummyCycles     = 0;
+
+    HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY);
+
+    printf("QSPI memory-mapped mode deactivated\r\n");
+}
+
+void QSPI_Enter4ByteAddrMode(void)
+{
+    QSPI_CommandTypeDef cmd = {0};
+
+    if (QSPI_WaitForReady(1000) != 0) {
+        printf("Device not ready for 4-byte mode\r\n");
+        return;
+    }
+
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction     = 0x06; // WREN
+    cmd.AddressMode     = QSPI_ADDRESS_NONE;
+    cmd.DataMode        = QSPI_DATA_NONE;
+    if (HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY) != HAL_OK) {
+        printf("WREN failed\r\n");
+        return;
+    }
+
+    cmd.Instruction     = 0xB7; // Enter 4-byte address mode
+    if (HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY) != HAL_OK) {
+        printf("Enter 4-byte mode failed\r\n");
+        return;
+    }
+
+    printf("Flash now in 4-byte address mode\r\n");
+}
+
+void QSPI_Exit4ByteAddrMode(void)
+{
+    QSPI_CommandTypeDef cmd = {0};
+
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction     = 0xE9; // Exit 4-byte address mode
+    cmd.AddressMode     = QSPI_ADDRESS_NONE;
+    cmd.DataMode        = QSPI_DATA_NONE;
+    HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY);
+
+    printf("Flash back to 3-byte address mode\r\n");
+}
+
+/* ===== QSPI Page Write & Read ===== */
+
+uint8_t QSPI_WritePage(uint8_t* data, uint32_t addr, uint32_t len)
+{
+  static uint32_t page_count = 0;
+  page_count++;
+
+  printf("  Writing page %lu (addr 0x%08lX, %lu bytes)...\n\r", page_count, addr, len);
+
+  if (QSPI_WaitForReady(1000) != 0) return 1;
+
+  QSPI_CommandTypeDef cmd = {0};
+
+  // WREN
+  cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+  cmd.Instruction     = 0x06;
+  cmd.AddressMode     = QSPI_ADDRESS_NONE;
+  cmd.DataMode        = QSPI_DATA_NONE;
+  if (HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY) != HAL_OK) return 1;
+
+  // PAGE PROGRAM (0x02) — 1-line address + 1-line data
+  cmd.Instruction = 0x02;
+  cmd.AddressMode = QSPI_ADDRESS_1_LINE;
+  cmd.Address     = addr;
+  cmd.AddressSize = QSPI_ADDRESS_24_BITS;
+  cmd.DataMode    = QSPI_DATA_1_LINE;
+  cmd.NbData      = len;
+
+  if (HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY) != HAL_OK) return 1;
+
+  if (HAL_QSPI_Transmit(&hqspi, data, HAL_MAX_DELAY) != HAL_OK) {
+    return 1;
+  }
+
+  // AFTER WRITE, CLEAR ERRORS — fresh cmd struct, instruction-only
+  {
+    QSPI_CommandTypeDef clr = {0};
+    clr.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    clr.Instruction     = 0x30;  // CLSR
+    clr.AddressMode     = QSPI_ADDRESS_NONE;
+    clr.DataMode        = QSPI_DATA_NONE;
+    HAL_QSPI_Command(&hqspi, &clr, HAL_MAX_DELAY);
+  }
+
+  if (QSPI_WaitForReady(10000) != 0) return 1;
+
+  printf("  Page %lu written\n\r", page_count);
+  return 0;
+}
+
+/* Normal read (0x03) - works in any mode */
+uint8_t QSPI_Read(uint8_t* buf, uint32_t addr, uint32_t len)
+{
+    if (QSPI_WaitForReady(1000) != 0) return 1;
+
+    QSPI_CommandTypeDef cmd = {0};
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction     = 0x03;
+    cmd.AddressMode     = QSPI_ADDRESS_1_LINE;
+    cmd.AddressSize     = QSPI_ADDRESS_24_BITS;
+    cmd.Address         = addr - 0x90000000;
+    cmd.DataMode        = QSPI_DATA_1_LINE;
+    cmd.DummyCycles     = 0;
+    cmd.NbData          = len;
+
+    HAL_StatusTypeDef status = HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY);
+    if (status != HAL_OK) {
+        printf("QSPI_Command failed: %d\r\n", status);
+        return 1;
+    }
+
+    return HAL_QSPI_Receive(&hqspi, buf, HAL_MAX_DELAY);
+}
+
+/* ===== QSPI Write Image to Flash ===== */
+
+int WriteImageToFlash(uint32_t flash_addr)
+{
+    uint32_t bytes_remaining = TOTAL_BYTES;
+    uint32_t current_addr = flash_addr;
+    uint32_t buffer_offset = 0;
+
+    printf("Writing %lu bytes to flash at 0x%08lX...\r\n", TOTAL_BYTES, flash_addr);
+
+    static uint8_t swap_buf[PAGE_SIZE];
+
+    while (bytes_remaining > 0) {
+
+        // === ERASE CURRENT 64KB BLOCK IF NEEDED ===
+        uint32_t block_start = current_addr & ~(BLOCK_SIZE - 1);
+        if ((current_addr & (BLOCK_SIZE - 1)) == 0) {
+            printf("  Erasing 64KB block at 0x%08lX...\r\n", block_start);
+            if (QSPI_EraseBlock64K_Diag(block_start) != 0) {
+                printf("  ERASE FAILED\r\n");
+                return -1;
+            }
+        }
+
+        // === PREPARE ONE PAGE (256 bytes max) ===
+        uint32_t page_len = (bytes_remaining > PAGE_SIZE) ? PAGE_SIZE : bytes_remaining;
+
+        // Copy + swap each 16-bit pixel
+        for (uint32_t i = 0; i < page_len; i += 2) {
+            uint8_t lo = image_buffer[buffer_offset + i];
+            uint8_t hi = image_buffer[buffer_offset + i + 1];
+            swap_buf[i]     = hi;
+            swap_buf[i + 1] = lo;
+        }
+
+        // === WRITE SWAPPED PAGE TO FLASH ===
+        if (QSPI_WritePage(swap_buf, current_addr, page_len) != 0) {
+            printf("  PAGE WRITE FAILED at 0x%08lX\r\n", current_addr);
+            return -1;
+        }
+
+        buffer_offset += page_len;
+        current_addr  += page_len;
+        bytes_remaining -= page_len;
+    }
+
+    printf("IMAGE FULLY WRITTEN & MAPPED\r\n");
+    return 0;
+}
+
+/* ===== QSPI Memory-Mapped Mode (0x6B Quad Output Read, 1-1-4) ===== */
+
+void QSPI_MemoryMapped_Read6B(void)
+{
+    QSPI_CommandTypeDef cmd = {0};
+
+    cmd.InstructionMode   = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction       = 0x6B;
+    cmd.AddressMode       = QSPI_ADDRESS_1_LINE;
+    cmd.AddressSize       = QSPI_ADDRESS_24_BITS;
+    cmd.DataMode          = QSPI_DATA_4_LINES;
+    cmd.DummyCycles       = 10;
+    cmd.DdrMode           = QSPI_DDR_MODE_DISABLE;
+    cmd.SIOOMode          = QSPI_SIOO_INST_EVERY_CMD;
+
+    HAL_QSPI_Command(&hqspi, &cmd, HAL_MAX_DELAY);
+    QSPI_MemoryMappedTypeDef cfg = {0};
+    cfg.TimeOutActivation = QSPI_TIMEOUT_COUNTER_DISABLE;
+    HAL_QSPI_MemoryMapped(&hqspi, &cmd, &cfg);
+
+    printf("QSPI memory-mapped mode enabled (0x6B 1-1-4)\n\r");
+}
+
+/* ===== QSPI Memory-Mapped Mode (0xEB Quad I/O Fast Read, 1-4-4) ===== */
+
+void QSPI_MemoryMapped_ReadEB(void)
+{
+    QSPI_CommandTypeDef s_command = {0};
+    QSPI_MemoryMappedTypeDef s_mem_mapped_cfg = {0};
+
+    s_command.InstructionMode   = QSPI_INSTRUCTION_1_LINE;
+    s_command.Instruction       = 0xEB;
+
+    s_command.AddressMode       = QSPI_ADDRESS_4_LINES;
+    s_command.AddressSize       = QSPI_ADDRESS_24_BITS;
+
+    s_command.AlternateByteMode = QSPI_ALTERNATE_BYTES_4_LINES;
+    s_command.AlternateBytesSize= QSPI_ALTERNATE_BYTES_8_BITS;
+    s_command.AlternateBytes    = 0x00;
+
+    s_command.DummyCycles       = 6;
+
+    s_command.DataMode          = QSPI_DATA_4_LINES;
+
+    s_command.SIOOMode          = QSPI_SIOO_INST_EVERY_CMD;
+
+    s_mem_mapped_cfg.TimeOutActivation = QSPI_TIMEOUT_COUNTER_DISABLE;
+
+    HAL_QSPI_MemoryMapped(&hqspi, &s_command, &s_mem_mapped_cfg);
+}
+
+/* ===== QSPI Memory-Mapped Mode (0x0B Fast Read, 1-1-1) ===== */
+
+void QSPI_MemoryMapped_Read0B(void)
+{
+    QSPI_CommandTypeDef      cmd = {0};
+    QSPI_MemoryMappedTypeDef cfg = {0};
+
+    cmd.InstructionMode   = QSPI_INSTRUCTION_1_LINE;
+    cmd.Instruction       = 0x0B;
+
+    cmd.AddressMode       = QSPI_ADDRESS_1_LINE;
+    cmd.AddressSize       = QSPI_ADDRESS_24_BITS;
+
+    cmd.AlternateByteMode = QSPI_ALTERNATE_BYTES_NONE;
+
+    cmd.DummyCycles       = 8;
+
+    cmd.DataMode          = QSPI_DATA_1_LINE;
+
+    cmd.DdrMode           = QSPI_DDR_MODE_DISABLE;
+    cmd.SIOOMode          = QSPI_SIOO_INST_EVERY_CMD;
+
+    cfg.TimeOutActivation = QSPI_TIMEOUT_COUNTER_DISABLE;
+
+    if (HAL_QSPI_MemoryMapped(&hqspi, &cmd, &cfg) != HAL_OK) {
+        printf("Memory-mapped 0x0B failed\r\n");
+        Error_Handler();
+    }
+
+    printf("QSPI memory-mapped mode enabled (0x0B 1-1-1)\r\n");
 }
 
 /* USER CODE END 4 */

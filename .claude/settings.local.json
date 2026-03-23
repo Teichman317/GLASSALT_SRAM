@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docplayer.net)",
+      "WebSearch",
+      "WebFetch(domain:community.st.com)",
+      "WebFetch(domain:www.allaboutcircuits.com)",
+      "Bash(git fetch:*)",
+      "WebFetch(domain:www.mouser.com)",
+      "Bash(python -c \"\nfrom PIL import Image\nimg = Image.open\\('D:/Dev/GLASSALT_SRAM/100sWheel28X567.png'\\)\nprint\\(f'PNG actual size: {img.size}'\\)\nprint\\(f'Mode: {img.mode}'\\)\n\" 2>/dev/null)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(which gcc:*)",
+      "Bash(gcc:*)",
+      "Bash(cl:*)",
+      "Bash(cmake:*)",
+      "Bash(where gcc:*)",
+      "Bash(arm-none-eabi-gcc --version)",
+      "Bash(where arm-none-eabi-gcc:*)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/ST/**)",
+      "Read(//c/Program Files \\(x86\\)/**)",
+      "Bash(cmd.exe //c \"where arm-none-eabi-gcc\" 2>/dev/null)",
+      "Read(//c/msys64/mingw64/bin/**)",
+      "Read(//c/msys64/usr/bin/**)",
+      "Read(//c/msys64/**)",
+      "Bash(/c/msys64/mingw64/bin/gcc.exe --version)",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe --version)",
+      "Bash(/c/msys64/ucrt64/bin/pkg-config.exe --modversion sdl2)",
+      "Bash(/c/msys64/ucrt64/bin/sdl2-config --version)",
+      "Bash(/c/msys64/ucrt64/bin/arm-none-eabi-gcc.exe --version)"
+    ]
+  }
+}
