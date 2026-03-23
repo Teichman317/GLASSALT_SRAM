@@ -25,6 +25,18 @@
 #define DRUM_Y        174
 #define DRUM_VIS_H    104
 
+/* 1000s counter drum strip (cell 0 = hatch, cells 1-10 = digits 0-9) */
+#define STRIP1K_WIDTH   45
+#define STRIP1K_FULL_H  583   /* full strip including hatch */
+#define STRIP1K_HEIGHT  530   /* digit-only portion (10 * 53) */
+#define STRIP1K_HATCH   53    /* hatch cell height to skip */
+#define STRIP1K_DIGITS  10
+#define DIGIT1K_HEIGHT  53.0f /* scaled down 5px per digit */
+#define DRUM1K_X        (DRUM_X - 10 - STRIP1K_WIDTH)  /* 10px gap outside 100s */
+#define DRUM10K_X       (DRUM1K_X - STRIP1K_WIDTH)     /* immediately left of 1000s */
+#define DRUM1K_Y        (DRUM_Y + (DRUM_VIS_H - DRUM1K_VIS_H) / 2)  /* vertically centered with 100s */
+#define DRUM1K_VIS_H    51   /* glyph ~41px + 5px top/bottom padding */
+
 /* Baro drums — 4 wheels, 5px gap between each, decimal between drum 1 and 2
  * Layout: [drum0][5px][drum1][dot][drum2][5px][drum3]
  * Total width: 4*28 + 3*5 = 127px (dot sits in the gap between drum1 and drum2) */
@@ -130,14 +142,14 @@ static void update_baro_drums(uint32_t *fb, const uint16_t *strip,
     float drum1_raw = fmodf(baro_val / 100.0f, 10.0f); /* ones */
     float drum0_raw = fmodf(baro_val / 1000.0f, 10.0f);/* tens */
 
-    /* Geneva carry: drum only moves when right neighbor crosses 9→0 zone.
-     * Locked drums snap to floor (Geneva mechanism holds at integer below). */
-    float frac3 = drum3_pos - floorf(drum3_pos);
-    float drum2_pos = (frac3 > 0.9f) ? drum2_raw : floorf(drum2_raw);
-    float frac2 = drum2_pos - floorf(drum2_pos);
-    float drum1_pos = (frac2 > 0.9f) ? drum1_raw : floorf(drum1_raw);
-    float frac1 = drum1_pos - floorf(drum1_pos);
-    float drum0_pos = (frac1 > 0.9f) ? drum0_raw : floorf(drum0_raw);
+    /* Geneva carry: drum gradually advances while right neighbor crosses 9→0.
+     * Carry fraction ramps linearly as the right digit goes from 9.0 to 10.0. */
+    float carry3 = (drum3_pos >= 9.0f) ? (drum3_pos - 9.0f) : 0.0f;
+    float drum2_pos = floorf(drum2_raw) + carry3;
+    float carry2 = (drum2_pos >= 9.0f && drum2_pos < 10.0f) ? (drum2_pos - 9.0f) : 0.0f;
+    float drum1_pos = floorf(drum1_raw) + carry2;
+    float carry1 = (drum1_pos >= 9.0f && drum1_pos < 10.0f) ? (drum1_pos - 9.0f) : 0.0f;
+    float drum0_pos = floorf(drum0_raw) + carry1;
 
     /* Wrap positions to 0-9.999 range */
     while (drum0_pos < 0) drum0_pos += 10.0f;
@@ -248,6 +260,15 @@ int main(int argc, char *argv[])
     uint16_t *ptr4444 = load_bin("../pointerargb4444.bin", PTR_WIDTH * PTR_HEIGHT * 2);
     if (!ptr4444) return 1;
 
+    uint16_t *strip1k_full = load_bin("../1000sWheel.bin", STRIP1K_WIDTH * STRIP1K_FULL_H * 2);
+    if (!strip1k_full) return 1;
+    /* Skip hatch cell — point to digit 0 onward */
+    uint16_t *strip1k = strip1k_full + STRIP1K_WIDTH * STRIP1K_HATCH;
+
+    /* 10,000s strip: [hatch][1][2]...[9] — hatch replaces 0 */
+    uint16_t *strip10k = load_bin("../10000sWheel.bin", STRIP1K_WIDTH * STRIP1K_HEIGHT * 2);
+    if (!strip10k) return 1;
+
     /* Create inverted + repacked + cropped strip for baro drums.
      * White digits on black, 10px vertical gap, trimmed horizontal padding.
      * Original strip has 5px padding on each side — keep 1px each side. */
@@ -341,7 +362,7 @@ int main(int argc, char *argv[])
     if (!tex) return 1;
 
     /* State */
-    float altitude = 0.0f;
+    float altitude = 8000.0f;
     float baro_inhg = 29.92f;  /* default barometric pressure */
     float baro_anim = 0.0f;    /* animated baro offset in hundredths */
     Uint32 last_tick = SDL_GetTicks();
@@ -368,9 +389,11 @@ int main(int argc, char *argv[])
         float dt = (now - last_tick) / 1000.0f;
         last_tick = now;
 
-        /* Climb at ~50 ft/sec */
-        altitude += dt * 50.0f;
-        if (altitude >= 1000.0f) altitude -= 1000.0f;
+        /* Triangle wave 8000→12000→8000 at 200 ft/sec */
+        static float alt_dir = 1.0f;
+        altitude += dt * 200.0f * alt_dir;
+        if (altitude >= 12000.0f) { altitude = 12000.0f; alt_dir = -1.0f; }
+        if (altitude <= 8000.0f)  { altitude = 8000.0f;  alt_dir =  1.0f; }
 
         /* Animate baro — slowly rotate the hundredths digit */
         baro_anim += dt * 0.5f;  /* +0.5 hundredths per second */
@@ -378,9 +401,33 @@ int main(int argc, char *argv[])
         float pointer_angle = (altitude / 1000.0f) * 2.0f * (float)M_PI;
         float drum_val = fmodf(altitude / 100.0f + 5.0f, 10.0f);
 
+        /* 1000s drum: transition as pointer sweeps 0→1 at each 1k boundary */
+        float drum1k_raw = fmodf(altitude / 1000.0f, 10.0f);
+        float within_1k = fmodf(altitude, 1000.0f);
+        float drum1k_val;
+        if (within_1k < 100.0f && altitude >= 100.0f) {
+            float t = within_1k / 100.0f;
+            drum1k_val = fmodf(floorf(drum1k_raw) - 1.0f + t + 10.0f, 10.0f);
+        } else {
+            drum1k_val = floorf(drum1k_raw);
+        }
+
+        /* 10,000s drum: transition as pointer sweeps 0→1 at each 10k boundary */
+        float drum10k_raw = fmodf(altitude / 10000.0f, 10.0f);
+        float within_10k = fmodf(altitude, 10000.0f);
+        float drum10k_val;
+        if (within_10k < 100.0f && altitude >= 100.0f) {
+            float t = within_10k / 100.0f;
+            drum10k_val = fmodf(floorf(drum10k_raw) - 1.0f + t + 10.0f, 10.0f);
+        } else {
+            drum10k_val = floorf(drum10k_raw);
+        }
+
         /* Render */
         memcpy(fb, bg_clean, IMG_WIDTH * IMG_HEIGHT * 4);
         blit_drum(fb, strip, STRIP_WIDTH, STRIP_HEIGHT, DIGIT_HEIGHT, DRUM_X, DRUM_Y, DRUM_VIS_H, drum_val);
+        blit_drum(fb, strip1k, STRIP1K_WIDTH, STRIP1K_HEIGHT, DIGIT1K_HEIGHT, DRUM1K_X, DRUM1K_Y, DRUM1K_VIS_H, drum1k_val);
+        blit_drum(fb, strip10k, STRIP1K_WIDTH, STRIP1K_HEIGHT, DIGIT1K_HEIGHT, DRUM10K_X, DRUM1K_Y, DRUM1K_VIS_H, drum10k_val);
         int baro_vis = (int)(baro_digit_height * 1.1f);
         float baro_display = baro_inhg + baro_anim * 0.01f;
         update_baro_drums(fb, baro_strip, baro_strip_w, baro_strip_height, baro_digit_height, baro_vis, baro_display);
@@ -392,7 +439,7 @@ int main(int argc, char *argv[])
         SDL_RenderPresent(ren);
     }
 
-    free(bg_clean); free(fb); free(ptr8888); free(strip); free(baro_strip);
+    free(bg_clean); free(fb); free(ptr8888); free(strip); free(strip1k_full); free(strip10k); free(baro_strip);
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);

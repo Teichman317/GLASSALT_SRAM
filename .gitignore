@@ -15,6 +15,13 @@ GLASSALT_SRAM/
 *.d
 *.elf
 *.bin
+!image.bin
+!100sWheel.bin
+!pointerargb4444.bin
+!pointer.bin
+!baroWheel.bin
+!1000sWheel.bin
+!10000sWheel.bin
 *.hex
 *.map
 *.list

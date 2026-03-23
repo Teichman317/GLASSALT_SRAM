@@ -28,7 +28,14 @@
       "Bash(/c/msys64/ucrt64/bin/gcc.exe --version)",
       "Bash(/c/msys64/ucrt64/bin/pkg-config.exe --modversion sdl2)",
       "Bash(/c/msys64/ucrt64/bin/sdl2-config --version)",
-      "Bash(/c/msys64/ucrt64/bin/arm-none-eabi-gcc.exe --version)"
+      "Bash(/c/msys64/ucrt64/bin/arm-none-eabi-gcc.exe --version)",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe -o simulator.exe main.c -I/c/msys64/ucrt64/include/SDL2 -L/c/msys64/ucrt64/lib -lmingw32 -lSDL2main -lSDL2 -lm)",
+      "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" gcc -o simulator.exe main.c -I/c/msys64/ucrt64/include/SDL2 -L/c/msys64/ucrt64/lib -lmingw32 -lSDL2main -lSDL2 -lm)",
+      "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" gcc -o gen_baro_strip.exe gen_baro_strip.c -lm)",
+      "Bash(./gen_baro_strip.exe)",
+      "Bash(python3:*)",
+      "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" ./simulator.exe)",
+      "Bash(echo \"EXIT:$?\")"
     ]
   }
 }
