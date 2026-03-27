@@ -43,6 +43,7 @@ typedef struct {
     float    value;           /* vertical speed in fpm */
 } SimPacket;
 
+#define INSTRUMENT_ALT  1
 #define INSTRUMENT_VSI  2
 #define PI_PORT         5555
 
@@ -390,6 +391,7 @@ int main(int argc, char *argv[])
     int sending = 0;
     float model_time = 0.0f;
     float vsi_fpm = 0.0f;
+    float altitude = 0.0f;  /* integrated altitude in feet */
     Uint32 last_tick = SDL_GetTicks();
     Uint32 last_send = 0;
     int packets_sent = 0;
@@ -425,6 +427,7 @@ int main(int argc, char *argv[])
                 if (rect_contains(go_btn, mx, my)) {
                     sending = !sending;
                     model_time = 0;
+                    altitude = 0.0f;
                     packets_sent = sending ? 0 : packets_sent;
                 }
             }
@@ -440,6 +443,7 @@ int main(int argc, char *argv[])
                 case SDLK_SPACE:
                     sending = !sending;
                     model_time = 0;
+                    altitude = 0.0f;
                     packets_sent = sending ? 0 : packets_sent;
                     break;
                 default: break;
@@ -454,10 +458,19 @@ int main(int argc, char *argv[])
         if (sending) {
             model_time += dt;
             vsi_fpm = model_compute(model, model_time);
+            /* Integrate altitude from vertical speed */
+            altitude += vsi_fpm * dt / 60.0f;  /* FPM to ft/sec */
+            if (altitude < 0.0f) altitude = 0.0f;
             if (now - last_send >= 33) {
                 SimPacket pkt;
+                /* Send VSI packet */
                 pkt.instrument_id = INSTRUMENT_VSI;
                 pkt.value = vsi_fpm;
+                sendto(sock, (const char *)&pkt, sizeof(pkt), 0,
+                       (struct sockaddr *)&pi_addr, sizeof(pi_addr));
+                /* Send altimeter packet */
+                pkt.instrument_id = INSTRUMENT_ALT;
+                pkt.value = altitude;
                 sendto(sock, (const char *)&pkt, sizeof(pkt), 0,
                        (struct sockaddr *)&pi_addr, sizeof(pi_addr));
                 last_send = now;
@@ -549,10 +562,15 @@ int main(int argc, char *argv[])
         draw_text(fb, WIN_WIDTH, 390, bar_y2 + 2, fpm_str, 1,
                   (fpm_int >= 0) ? 0xFF00CC66 : 0xFFCC6600);
 
+        /* Altitude readout */
+        char alt_str[32];
+        snprintf(alt_str, sizeof(alt_str), "ALT %d", (int)altitude);
+        draw_text(fb, WIN_WIDTH, 390, bar_y2 + 14, alt_str, 1, 0xFF44AAFF);
+
         /* Packet count */
         char pkt_str[32];
         snprintf(pkt_str, sizeof(pkt_str), "%d", packets_sent);
-        draw_text(fb, WIN_WIDTH, 390, bar_y2 + 14, pkt_str, 1, col_dim);
+        draw_text(fb, WIN_WIDTH, 390, bar_y2 + 26, pkt_str, 1, col_dim);
 
         SDL_UpdateTexture(tex, NULL, fb, WIN_WIDTH * 4);
         SDL_RenderClear(ren);
