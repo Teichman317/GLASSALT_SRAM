@@ -35,6 +35,7 @@
       "Bash(python3:*)",
       "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" ./simulator.exe)",
       "Bash(echo \"EXIT:$?\")",
+      "Bash(./simulator.exe)",
       "Bash(git pull:*)",
       "Bash(git stash:*)",
       "Bash(/c/msys64/usr/bin/pacman.exe -Ss cross-compiler)",
@@ -43,7 +44,12 @@
       "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" ./vsi_sim.exe)",
       "Bash(git add:*)",
       "Bash(git push:*)",
-      "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" gcc -o vsi_host.exe vsi_host.c -I/c/msys64/ucrt64/include/SDL2 -L/c/msys64/ucrt64/lib -lmingw32 -lSDL2main -lSDL2 -lm -lws2_32)"
+      "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" gcc -o vsi_host.exe vsi_host.c -I/c/msys64/ucrt64/include/SDL2 -L/c/msys64/ucrt64/lib -lmingw32 -lSDL2main -lSDL2 -lm -lws2_32)",
+      "Bash(git reset:*)",
+      "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" gcc -o vsi_host.exe simulator/vsi_host.c -I/c/msys64/ucrt64/include/SDL2 -L/c/msys64/ucrt64/lib -lmingw32 -lSDL2main -lSDL2 -lm -lws2_32)",
+      "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" gcc -o vsi_cal.exe vsi_cal.c -I/c/msys64/ucrt64/include/SDL2 -L/c/msys64/ucrt64/lib -lmingw32 -lSDL2main -lSDL2 -lm -lws2_32)",
+      "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" gcc -o simulator/vsi_cal.exe simulator/vsi_cal.c -I/c/msys64/ucrt64/include/SDL2 -L/c/msys64/ucrt64/lib -lmingw32 -lSDL2main -lSDL2 -lm -lws2_32)",
+      "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" gcc -o simulator/vsi_cal.exe vsi_cal.c -I/c/msys64/ucrt64/include/SDL2 -L/c/msys64/ucrt64/lib -lmingw32 -lSDL2main -lSDL2 -lm -lws2_32)"
     ]
   }
 }

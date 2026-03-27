@@ -829,7 +829,7 @@ int main(void)
    * TIM4 clk = 108 MHz, Period = 65535 -> ~1648 Hz PWM
    * 50% duty cycle for initial test */
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 32768);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 60000); //32768
 
   /* FATFS: directory listing disabled — SD card init hanging, debug separately */
   #if 0
