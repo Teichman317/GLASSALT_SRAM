@@ -355,6 +355,7 @@ int main(int argc, char *argv[])
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1,
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!ren) return 1;
+    SDL_RenderSetLogicalSize(ren, IMG_WIDTH, IMG_HEIGHT);  /* maintain aspect ratio */
 
     SDL_Texture *tex = SDL_CreateTexture(ren,
         SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
