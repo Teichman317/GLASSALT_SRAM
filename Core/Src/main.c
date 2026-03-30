@@ -1709,7 +1709,17 @@ static void MX_Custom_LTDC_Init(void)
     hltdc.Init.VSPolarity = LTDC_VSPOLARITY_AL;
     hltdc.Init.DEPolarity = LTDC_DEPOLARITY_AL;
     hltdc.Init.PCPolarity = LTDC_PCPOLARITY_IPC;
-    /* Typical ST7701S 480x480 timing — 24 MHz pixel clock → ~60 Hz */
+    /*
+     * ST7701S 480x480 LTDC timing
+     * Total frame: 520 × 512 = 266,240 pixel clocks per frame
+     *
+     * At 24 MHz pixel clock (current PLLSAIR=4): 24M/266240 = ~90 Hz
+     * At 32 MHz pixel clock (future  PLLSAIR=3): 32M/266240 = ~120 Hz
+     *
+     * These blanking values are known-good for the ST7701S.  If 120 Hz
+     * doesn't sync, try reducing HFP/VFP first before touching active timing.
+     * See PLLSAI notes in stm32f7xx_hal_msp.c for the full 120 Hz plan.
+     */
     hltdc.Init.HorizontalSync = 9;     /* HSW = 10 */
     hltdc.Init.VerticalSync = 1;       /* VSW = 2 */
     hltdc.Init.AccumulatedHBP = 19;    /* HSW+HBP = 10+10 = 20 */

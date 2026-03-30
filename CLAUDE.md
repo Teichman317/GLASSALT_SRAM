@@ -34,7 +34,7 @@ Code placed outside these markers will be **overwritten** the next time CubeMX r
 
 The `main()` function initializes peripherals in this order:
 1. `MPU_Config()` — configures MPU: Region 0 covers 4 GB with no-access (SubRegionDisable=0x87 enables only selected sub-regions)
-2. `HAL_Init()` / `SystemClock_Config()` — HSI @ 16 MHz → PLL → 96 MHz SYSCLK
+2. `HAL_Init()` / `SystemClock_Config()` — HSE 8 MHz → PLL → 216 MHz SYSCLK (overdrive)
 3. Peripheral inits: GPIO → DMA → FMC (SDRAM) → ETH → SDMMC1 → DMA2D → QUADSPI → LTDC → TIM2 → TIM4 → I2C4 → SPI6 → USB_OTG_FS
 
 ### MSP Layer (`Core/Src/stm32f7xx_hal_msp.c`)
@@ -46,7 +46,7 @@ GPIO alternate function mappings and DMA linkage for each peripheral live here. 
 | Peripheral | Purpose | Key Pins |
 |---|---|---|
 | FMC/SDRAM | External 16-bit SDRAM, Bank 1, 12-bit addr, 4 banks | PF0–PF5,PF11–PF15, PG0,PG1,PG4,PG5,PG8,PG15, PD0,PD1,PD8–PD10,PD14,PD15, PE0,PE1,PE7–PE15, PC0,PC2,PC3 |
-| LTDC | RGB565 LCD controller, 640×480, 2 layers | ARGB8888 pixel format in layer config |
+| LTDC | ST7701S 480×480 round LCD, 2 layers (L0: RGB565 background, L1: ARGB4444 overlay) | ~24 LTDC GPIO pins |
 | DMA2D | GPU for framebuffer blits (ARGB4444) | — |
 | QUADSPI | External quad-SPI flash, single bank | PB2(CLK), PB6(NCS), PE2,PF6,PF8,PF9(IO0–3) |
 | SDMMC1 | SD card, 4-bit bus, DMA2 Stream3/6 | PC8–PC12, PD2 |
@@ -71,10 +71,18 @@ GPIO alternate function mappings and DMA linkage for each peripheral live here. 
 
 ### Clock Tree
 
-- Source: HSI 16 MHz
-- PLL: M=16, N=192, P=2 → **SYSCLK = 96 MHz**
-- PLLSAI: N=192, R=2, DivR=2 → **LTDC pixel clock = 48 MHz**
-- SDMMC1 clocked from SYSCLK (16 MHz effective with ClockDiv=0)
+- Source: HSE 8 MHz (external crystal)
+- PLL: M=8, N=432, P=2 → **SYSCLK = 216 MHz** (overdrive enabled)
+- APB1 = SYSCLK/4 = 54 MHz, APB2 = SYSCLK/2 = 108 MHz
+- PLLSAI: N=192, R=4, DivR=2 → **LTDC pixel clock = 24 MHz**
+- LTDC total frame: 520×512 = 266,240 clocks → **~90 Hz actual refresh**
+- SDMMC1 clocked from 48 MHz (PLL48CLK: PLLQ=9 → 432/9 = 48 MHz)
+
+#### 120 Hz Upgrade Plan (target: new custom boards, ~2026-04-13)
+
+Customer requirement: VR headset passthrough cameras see retrace/tearing artifacts on physical 3" round ST7701S LCD panels. Fix: raise refresh to 120 Hz to eliminate beat frequency with 90-120 Hz headset cameras.
+
+**Change:** PLLSAIR 4→3 → pixel clock 32 MHz → 32M/(520×512) = **~120 Hz**. One-line change in `stm32f7xx_hal_msp.c` (HAL_LTDC_MspInit). Bandwidth OK: ~128 MB/s LTDC reads vs ~400 MB/s SDRAM capacity at 216 MHz. See detailed notes in the source file.
 
 ### Project Files
 

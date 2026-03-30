@@ -2,6 +2,13 @@
  * Altimeter Receiver — runs on Raspberry Pi, receives UDP from host
  * 480x480 AAU-19/A altimeter face with counter drums + rotating pointer
  *
+ * Display refresh is decoupled from data update:
+ *   - Screen presents at the display's native rate (e.g. 120 Hz OSEE)
+ *   - Instrument rendering only happens when data actually changes
+ *     (UDP arrival or demo animation tick)
+ *   - Between changes, SDL re-presents the same texture — near-zero CPU
+ *   This keeps the Pi cool even at high display refresh rates.
+ *
  * Usage: ./altimeter_pi [port]
  *        Default port: 5557
  *        ESC to quit
@@ -314,9 +321,18 @@ int main(int argc, char *argv[])
     /* ---- State ---- */
     float altitude = 8000.0f;
     float baro_inhg = 29.92f;
-    int got_data = 0;
-    float alt_dir = 1.0f;
+    int got_data = 0;            /* set once first UDP packet arrives */
+    float alt_dir = 1.0f;       /* demo animation direction */
     Uint32 last_tick = SDL_GetTicks();
+
+    /*
+     * dirty flag: controls whether we re-render the instrument.
+     * Set when data changes (UDP or demo animation).  Cleared after render.
+     * When clean, the main loop just re-presents the existing texture —
+     * the GPU/display controller scans it out at the display's native
+     * refresh rate (e.g. 120 Hz) with near-zero CPU cost.
+     */
+    int dirty = 1;
 
     int running = 1;
     while (running) {
@@ -333,6 +349,9 @@ int main(int argc, char *argv[])
         }
 
         /* ---- Receive UDP ---- */
+        /* Drain all queued packets, keeping only the most recent values.
+         * The host sends at ~30 Hz; we may receive several packets between
+         * display frames, but only the latest matters. */
         AltPacket pkt;
         ssize_t n;
         while ((n = recvfrom(sock, &pkt, sizeof(pkt), 0, NULL, NULL)) > 0) {
@@ -340,55 +359,77 @@ int main(int argc, char *argv[])
                 altitude = pkt.altitude;
                 baro_inhg = pkt.baro_inhg;
                 got_data = 1;
+                dirty = 1;       /* new data → need to re-render */
             }
         }
 
-        /* Demo animation if no UDP */
+        /* Demo animation if no UDP — always marks dirty since values change */
         if (!got_data) {
             altitude += dt * 200.0f * alt_dir;
             if (altitude >= 12000) { altitude = 12000; alt_dir = -1; }
             if (altitude <= 8000)  { altitude = 8000;  alt_dir = 1; }
+            dirty = 1;
         }
 
-        /* ---- Compute drum positions ---- */
-        float pointer_angle = (altitude / 1000.0f) * 2.0f * (float)M_PI;
-        float drum_val = fmodf(altitude / 100.0f + 5.0f, 10.0f);
+        /*
+         * Only do the expensive CPU rendering when data has changed.
+         * At 120 Hz display refresh with 30 Hz data, this means we render
+         * ~30 frames and re-present ~90 frames per second — a 4x reduction
+         * in CPU work compared to rendering every frame.
+         */
+        if (dirty) {
+            /* ---- Compute drum positions ---- */
+            float pointer_angle = (altitude / 1000.0f) * 2.0f * (float)M_PI;
+            float drum_val = fmodf(altitude / 100.0f + 5.0f, 10.0f);
 
-        float drum1k_raw = fmodf(altitude / 1000.0f, 10.0f);
-        float within_1k = fmodf(altitude, 1000.0f);
-        float drum1k_val;
-        if (within_1k < 100.0f && altitude >= 100.0f) {
-            float t = within_1k / 100.0f;
-            drum1k_val = fmodf(floorf(drum1k_raw) - 1.0f + t + 10.0f, 10.0f);
-        } else {
-            drum1k_val = floorf(drum1k_raw);
+            float drum1k_raw = fmodf(altitude / 1000.0f, 10.0f);
+            float within_1k = fmodf(altitude, 1000.0f);
+            float drum1k_val;
+            if (within_1k < 100.0f && altitude >= 100.0f) {
+                float t = within_1k / 100.0f;
+                drum1k_val = fmodf(floorf(drum1k_raw) - 1.0f + t + 10.0f, 10.0f);
+            } else {
+                drum1k_val = floorf(drum1k_raw);
+            }
+
+            float drum10k_raw = fmodf(altitude / 10000.0f, 10.0f);
+            float within_10k = fmodf(altitude, 10000.0f);
+            float drum10k_val;
+            if (within_10k < 100.0f && altitude >= 100.0f) {
+                float t = within_10k / 100.0f;
+                drum10k_val = fmodf(floorf(drum10k_raw) - 1.0f + t + 10.0f, 10.0f);
+            } else {
+                drum10k_val = floorf(drum10k_raw);
+            }
+
+            /* ---- Render into framebuffer ---- */
+            memcpy(fb, bg_clean, W*H*4);
+            blit_drum(fb, strip, STRIP_WIDTH, STRIP_HEIGHT, DIGIT_HEIGHT,
+                      DRUM_X, DRUM_Y, DRUM_VIS_H, drum_val);
+            blit_drum(fb, strip1k, STRIP1K_WIDTH, STRIP1K_HEIGHT, DIGIT1K_HEIGHT,
+                      DRUM1K_X, DRUM1K_Y, DRUM1K_VIS_H, drum1k_val);
+            blit_drum(fb, strip10k, STRIP1K_WIDTH, STRIP1K_HEIGHT, DIGIT1K_HEIGHT,
+                      DRUM10K_X, DRUM1K_Y, DRUM1K_VIS_H, drum10k_val);
+
+            int baro_vis = (int)(baro_digit_height * 1.1f);
+            update_baro_drums(fb, baro_strip, baro_strip_w, baro_strip_h,
+                              baro_digit_height, baro_vis, baro_inhg);
+            rotate_pointer(fb, ptr8888, pointer_angle);
+
+            /* Upload the new framebuffer to the GPU texture */
+            SDL_UpdateTexture(tex, NULL, fb, W*4);
+
+            dirty = 0;
         }
 
-        float drum10k_raw = fmodf(altitude / 10000.0f, 10.0f);
-        float within_10k = fmodf(altitude, 10000.0f);
-        float drum10k_val;
-        if (within_10k < 100.0f && altitude >= 100.0f) {
-            float t = within_10k / 100.0f;
-            drum10k_val = fmodf(floorf(drum10k_raw) - 1.0f + t + 10.0f, 10.0f);
-        } else {
-            drum10k_val = floorf(drum10k_raw);
-        }
-
-        /* ---- Render ---- */
-        memcpy(fb, bg_clean, W*H*4);
-        blit_drum(fb, strip, STRIP_WIDTH, STRIP_HEIGHT, DIGIT_HEIGHT,
-                  DRUM_X, DRUM_Y, DRUM_VIS_H, drum_val);
-        blit_drum(fb, strip1k, STRIP1K_WIDTH, STRIP1K_HEIGHT, DIGIT1K_HEIGHT,
-                  DRUM1K_X, DRUM1K_Y, DRUM1K_VIS_H, drum1k_val);
-        blit_drum(fb, strip10k, STRIP1K_WIDTH, STRIP1K_HEIGHT, DIGIT1K_HEIGHT,
-                  DRUM10K_X, DRUM1K_Y, DRUM1K_VIS_H, drum10k_val);
-
-        int baro_vis = (int)(baro_digit_height * 1.1f);
-        update_baro_drums(fb, baro_strip, baro_strip_w, baro_strip_h,
-                          baro_digit_height, baro_vis, baro_inhg);
-        rotate_pointer(fb, ptr8888, pointer_angle);
-
-        SDL_UpdateTexture(tex, NULL, fb, W*4);
+        /*
+         * Present runs EVERY frame regardless of dirty flag.
+         * With PRESENTVSYNC, SDL blocks here until the next display
+         * refresh (8.3 ms at 120 Hz).  Since the texture is already
+         * in GPU memory, this is just a page-flip — essentially free.
+         * The display always shows the most recent render at its
+         * native refresh rate, with no tearing.
+         */
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);
     }

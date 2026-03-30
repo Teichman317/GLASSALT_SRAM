@@ -341,9 +341,38 @@ void HAL_LTDC_MspInit(LTDC_HandleTypeDef* hltdc)
 
   /** Initializes the peripherals clock
   */
+    /*
+     * ===== 120 Hz UPGRADE NOTES (2026-04-13 target: new custom boards) =====
+     *
+     * Current: PLLSAIR=4 → HSE(8)/PLLM(8) × 192 / 4 / DivR(2) = 24 MHz pixel clock
+     *          With LTDC timing 520×512 total → 24M / (520×512) = ~90 Hz actual
+     *
+     * To hit 120 Hz: change PLLSAIR from 4 to 3:
+     *          HSE(8)/PLLM(8) × 192 / 3 / DivR(2) = 32 MHz pixel clock
+     *          32M / (520×512) = ~120.2 Hz
+     *
+     * Bandwidth check at 32 MHz pixel clock, 216 MHz SYSCLK:
+     *   Layer 0 (RGB565):  32M × 2 bytes = 64 MB/s
+     *   Layer 1 (ARGB4444): 32M × 2 bytes = 64 MB/s
+     *   Total LTDC reads: ~128 MB/s vs ~400 MB/s FMC/SDRAM capacity = OK
+     *
+     * Customer requirement: VR headset passthrough cameras (90-120 Hz) see
+     * tearing/retrace artifacts on the physical round LCD panels.  120 Hz
+     * eliminates the beat frequency.  The ST7701S panel manufacturer confirms
+     * no hardware limitation preventing 120 Hz.
+     *
+     * WHEN NEW BOARDS ARRIVE:
+     *   1. Change PLLSAIR = 3 below (one line)
+     *   2. Test — if ST7701S doesn't sync, try PLLSAIN=288 PLLSAIR=6 → also 24 MHz,
+     *      then adjust from there.  Or reduce blanking in MX_Custom_LTDC_Init().
+     *   3. The LTDC vsync buffer swap (LTDC->SRCR = LTDC_SRCR_VBR in main.c)
+     *      already prevents software tearing — no code changes needed there.
+     *   4. Update CLAUDE.md clock tree section when confirmed working.
+     * =========================================================================
+     */
     PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_LTDC;
     PeriphClkInitStruct.PLLSAI.PLLSAIN = 192;
-    PeriphClkInitStruct.PLLSAI.PLLSAIR = 4;  /* 192/4/2 = 24 MHz pixel clock — CubeMX regen resets this! */
+    PeriphClkInitStruct.PLLSAI.PLLSAIR = 4;  /* ← change to 3 for 120 Hz (see notes above) */
     PeriphClkInitStruct.PLLSAI.PLLSAIQ = 2;
     PeriphClkInitStruct.PLLSAI.PLLSAIP = RCC_PLLSAIP_DIV2;
     PeriphClkInitStruct.PLLSAIDivQ = 1;
