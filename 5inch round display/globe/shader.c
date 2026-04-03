@@ -45,6 +45,11 @@ GLuint shader_load(const char *vert_path, const char *frag_path)
     GLuint prog = glCreateProgram();
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
+#ifdef USE_GLES
+    glBindAttribLocation(prog, 0, "aPos");
+    glBindAttribLocation(prog, 1, "aNorm");
+    glBindAttribLocation(prog, 2, "aUV");
+#endif
     glLinkProgram(prog);
 
     GLint ok;

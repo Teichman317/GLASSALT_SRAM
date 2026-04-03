@@ -1,0 +1,11 @@
+CC      = gcc
+CFLAGS  = -Wall -O2 -std=c99 -DUSE_GLES $(shell sdl2-config --cflags)
+LIBS    = $(shell sdl2-config --libs) -lGLESv2 -lm
+TARGET  = globe
+SRCS    = main.c globe.c shader.c texture.c
+
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LIBS)
+
+clean:
+	rm -f $(TARGET)

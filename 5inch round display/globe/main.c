@@ -1,6 +1,12 @@
 #include <stdio.h>
 #include <math.h>
+
+#ifdef USE_GLES
+#include <GLES2/gl2.h>
+#else
 #include <GL/glew.h>
+#endif
+
 #include <SDL2/SDL.h>
 #include "globe.h"
 #include "shader.h"
@@ -70,8 +76,29 @@ static void mat4_translate(float *m, float x, float y, float z)
 
 /* ── circular mask overlay ── */
 
-static GLuint mask_vao, mask_vbo, mask_prog;
+static GLuint mask_vbo, mask_prog;
+#ifndef USE_GLES
+static GLuint mask_vao;
+#endif
 
+#ifdef USE_GLES
+static const char *mask_vs_src =
+    "attribute vec2 aPos;\n"
+    "varying vec2 vUV;\n"
+    "void main() {\n"
+    "    vUV = aPos * 0.5 + 0.5;\n"
+    "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+    "}\n";
+
+static const char *mask_fs_src =
+    "precision mediump float;\n"
+    "varying vec2 vUV;\n"
+    "void main() {\n"
+    "    vec2 c = vUV - vec2(0.5);\n"
+    "    if (dot(c,c) < 0.25) discard;\n"
+    "    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "}\n";
+#else
 static const char *mask_vs_src =
     "#version 330 core\n"
     "layout(location=0) in vec2 aPos;\n"
@@ -90,18 +117,26 @@ static const char *mask_fs_src =
     "    if (dot(c,c) < 0.25) discard;\n"
     "    FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n"
     "}\n";
+#endif
 
 static void mask_init(void)
 {
     float quad[] = { -1,-1, 1,-1, -1,1, 1,1 };
+
+#ifndef USE_GLES
     glGenVertexArrays(1, &mask_vao);
     glBindVertexArray(mask_vao);
+#endif
+
     glGenBuffers(1, &mask_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, mask_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+
+#ifndef USE_GLES
     glBindVertexArray(0);
+#endif
 
     /* compile inline shaders */
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
@@ -113,6 +148,9 @@ static void mask_init(void)
     mask_prog = glCreateProgram();
     glAttachShader(mask_prog, vs);
     glAttachShader(mask_prog, fs);
+#ifdef USE_GLES
+    glBindAttribLocation(mask_prog, 0, "aPos");
+#endif
     glLinkProgram(mask_prog);
     glDeleteShader(vs);
     glDeleteShader(fs);
@@ -121,9 +159,16 @@ static void mask_init(void)
 static void mask_draw(void)
 {
     glUseProgram(mask_prog);
+#ifdef USE_GLES
+    glBindBuffer(GL_ARRAY_BUFFER, mask_vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+#else
     glBindVertexArray(mask_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
+#endif
 }
 
 /* ── main ── */
@@ -137,11 +182,17 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+#ifdef USE_GLES
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 4);
+#endif
 
     SDL_Window *win = SDL_CreateWindow("Globe",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -154,26 +205,34 @@ int main(int argc, char *argv[])
     SDL_GLContext ctx = SDL_GL_CreateContext(win);
     SDL_GL_SetSwapInterval(1); /* vsync */
 
+#ifndef USE_GLES
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK) {
         fprintf(stderr, "glewInit failed\n");
         return 1;
     }
+#endif
 
-    printf("OpenGL %s\n", glGetString(GL_VERSION));
+    printf("GL: %s\n", glGetString(GL_VERSION));
 
     glEnable(GL_DEPTH_TEST);
+#ifndef USE_GLES
     glEnable(GL_MULTISAMPLE);
+#endif
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 
     /* load resources */
+#ifdef USE_GLES
+    GLuint prog = shader_load("vert_es.glsl", "frag_es.glsl");
+#else
     GLuint prog = shader_load("vert.glsl", "frag.glsl");
+#endif
     if (!prog) return 1;
 
-    GLuint tex = texture_load("earth.jpg");
+    GLuint tex = texture_load("earth_blue.jpg");
     if (!tex) {
-        fprintf(stderr, "Failed to load earth.jpg — place an equirectangular Earth "
-                "texture named earth.jpg in this directory.\n");
+        fprintf(stderr, "Failed to load earth_blue.jpg — place an equirectangular Earth "
+                "texture named earth_blue.jpg in this directory.\n");
         return 1;
     }
 
@@ -222,7 +281,7 @@ int main(int argc, char *argv[])
         glUniformMatrix4fv(loc_mvp, 1, GL_FALSE, mvp);
         glUniformMatrix4fv(loc_model, 1, GL_FALSE, model);
         glUniform1i(loc_tex, 0);
-        glUniform3f(loc_lightdir, 0.5f, 0.3f, 0.8f); /* sun direction */
+        glUniform3f(loc_lightdir, 0.0f, 0.3f, 1.0f); /* sun direction — front-on */
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex);

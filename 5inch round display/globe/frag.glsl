@@ -11,5 +11,5 @@ void main() {
     vec3 n     = normalize(vNorm);
     float diff = max(dot(n, normalize(uLightDir)), 0.0);
     vec4 col   = texture(uTex, vUV);
-    FragColor  = vec4(col.rgb * (0.15 + 0.85 * diff), 1.0);
+    FragColor  = vec4(col.rgb * (0.35 + 0.65 * diff), 1.0);
 }

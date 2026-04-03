@@ -16,8 +16,13 @@ GLuint texture_load(const char *path)
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
+#ifdef USE_GLES
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, data);
+#else
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, data);
+#endif
     glGenerateMipmap(GL_TEXTURE_2D);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
