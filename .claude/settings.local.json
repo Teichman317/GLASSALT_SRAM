@@ -33,7 +33,10 @@
       "Bash(git add:*)",
       "Bash(git push:*)",
       "Bash(git reset:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(PATH=\"/c/msys64/ucrt64/bin:$PATH\" gcc asi_host.c -o asi_host.exe -IC:/msys64/ucrt64/include/SDL2 -LC:/msys64/ucrt64/lib -lmingw32 -lSDL2main -lSDL2 -mwindows -lm -lws2_32 -O2)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/nothings/stb/master/stb_image.h\" -o \"D:/Dev/GLASSALT_SRAM/5inch round display/globe/stb_image.h\")",
+      "Bash(grep -E \"^/\\\\*|^//|gcc|compile\")"
     ]
   }
 }

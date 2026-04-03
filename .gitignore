@@ -25,3 +25,5 @@ GLASSALT_SRAM/
 *.hex
 *.map
 *.list
+*.exe
+*.dll
