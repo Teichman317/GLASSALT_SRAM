@@ -204,7 +204,14 @@ typedef struct {
 #define PTR_WIDTH   63
 #define PTR_HEIGHT  240
 #define PIVOT_X     32
-#define PIVOT_Y     50
+#define PIVOT_Y     36
+
+/* Screen-space rotation center for the pointer.  This is where the pointer's
+ * pivot (PIVOT_X, PIVOT_Y) gets placed on the dial.  The dial face is square
+ * but the round bezel artwork places the visual hub a bit above geometric
+ * center, so we offset Y upward. */
+#define PIVOT_SCREEN_X  (CX - 5)
+#define PIVOT_SCREEN_Y  (CY - 10)
 
 /* ================================================================== */
 /*  5x7 bitmap font                                                   */
@@ -647,7 +654,7 @@ static void rotate_pointer(uint32_t *fb, const uint32_t *ptr, float angle_rad)
     int nx0=DISP_W,ny0=DISP_H,nx1=0,ny1=0;
     for(int c=0;c<4;c++){
         float fx=(float)(csx[c]-PIVOT_X), fy=(float)(csy[c]-PIVOT_Y);
-        int dx=CX+(int)(fx*cosA-fy*sinA), dy=CY+(int)(fx*sinA+fy*cosA);
+        int dx=PIVOT_SCREEN_X+(int)(fx*cosA-fy*sinA), dy=PIVOT_SCREEN_Y+(int)(fx*sinA+fy*cosA);
         if(dx<nx0)nx0=dx; if(dx>nx1)nx1=dx;
         if(dy<ny0)ny0=dy; if(dy>ny1)ny1=dy;
     }
@@ -660,7 +667,7 @@ static void rotate_pointer(uint32_t *fb, const uint32_t *ptr, float angle_rad)
      * back to the pointer sprite coordinate space */
     for(int dy=ny0;dy<=ny1;dy++) for(int dx=nx0;dx<=nx1;dx++){
         /* Offset from screen center (rotation pivot) */
-        float fx=(float)(dx-CX), fy=(float)(dy-CY);
+        float fx=(float)(dx-PIVOT_SCREEN_X), fy=(float)(dy-PIVOT_SCREEN_Y);
 
         /* Inverse rotation: screen coordinates -> pointer sprite coordinates.
          * This reverses the forward rotation so we can sample the source pixel. */
@@ -1004,12 +1011,17 @@ int main(int argc, char *argv[])
          *   At 8000 ft, the pointer has made 8 full revolutions.
          *   At 8500 ft, it's at the 6 o'clock position (half revolution).
          *
+         *   The +M_PI offset compensates for the pointer sprite's
+         *   orientation: its tip points DOWN in source coordinates
+         *   (pivot is near the top of the sprite), so at angle 0
+         *   the tip would point at "5" on the dial.  Adding pi rotates
+         *   it half a turn so altitude 0 / 1000 / 2000 etc. correctly
+         *   places the tip at "0" (12 o'clock).
+         *
          * 100s DRUM VALUE (drum_val):
          *   We want the 100s digit (0-9) centered in the drum window.
          *   altitude/100 gives the raw hundreds value; fmodf(…,10)
-         *   wraps it to 0-9.  The +5 offset shifts the drum so that
-         *   digit 0 appears at the top of the visible window rather
-         *   than the center (this compensates for the strip layout).
+         *   wraps it to 0-9, matching the digital altitude readout.
          *
          * 1000s DRUM VALUE (d1kv):
          *   The integer part of altitude/1000 gives which digit to show.
@@ -1027,8 +1039,8 @@ int main(int argc, char *argv[])
          *   The carry animation happens when the lower four digits are
          *   in the 0-99 range, smoothly advancing the 10000s drum.
          */
-        float ptr_angle=(altitude/1000)*2*(float)M_PI;
-        float drum_val=fmodf(altitude/100+5,10);
+        float ptr_angle=(altitude/1000)*2*(float)M_PI + (float)M_PI;
+        float drum_val=fmodf(altitude/100,10);
         float d1kr=fmodf(altitude/1000,10), w1k=fmodf(altitude,1000);
         float d1kv=(w1k<100&&altitude>=100)?fmodf(floorf(d1kr)-1+w1k/100+10,10):floorf(d1kr);
         float d10kr=fmodf(altitude/10000,10), w10k=fmodf(altitude,10000);
